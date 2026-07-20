@@ -1,0 +1,12 @@
+タグ 'robotics' の検索結果 (2件):
+
+  ロボット制御メモ (2026-05-10)
+    path: notes/robotics-control.md
+    tags: control, robotics
+    summary: PID とモデル予測制御の比較。
+
+  SLAM の基礎 (2026-05-01)
+    path: notes/robotics-slam.md
+    tags: localization, robotics, slam
+    summary: 移動ロボットの自己位置推定と地図構築の基礎。
+

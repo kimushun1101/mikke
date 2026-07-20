@@ -1,0 +1,12 @@
+全文検索 'zebra' の結果 (2件, BM25 relevance 順):
+
+  シマウマ孫ノート (2026-04-05)
+    path: nested/inner/zebra-inner.md
+    tags: inner, nested
+    summary: 孫 repo 側の zebra ノート。
+
+  シマウマ観察ガイド (2026-04-10)
+    path: nested/notes/zebra-guide.md
+    tags: nested, zoology
+    summary: zebra の縞模様の観察手順のまとめ。
+

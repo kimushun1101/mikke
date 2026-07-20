@@ -1,0 +1,7 @@
+ハイブリッド検索 'ロボット 制御' の結果 (上位3件, BM25 のみ (semantic 未構築)):
+
+  ロボット制御メモ (2026-05-10)  [score: 0.0164 via bm25]
+    path: notes/robotics-control.md
+    tags: control, robotics
+    summary: PID とモデル予測制御の比較。
+

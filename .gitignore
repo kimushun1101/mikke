@@ -1,0 +1,7 @@
+/target
+Cargo.lock
+# per-repo search index (always regenerable — docs/SPEC.md)
+.mikke/
+# LOCAL-ONLY zig toolchain override for the dev sandbox (absolute home paths,
+# must not leak into CI or other machines).
+/.cargo/config.toml

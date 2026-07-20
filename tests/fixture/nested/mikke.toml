@@ -1,0 +1,3 @@
+# ネストしたノート repo (親からの走査でこの [scan] が委譲される)
+[scan]
+exclude_dirs = ["drafts"]

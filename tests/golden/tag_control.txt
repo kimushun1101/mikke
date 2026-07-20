@@ -1,0 +1,7 @@
+タグ 'control' の検索結果 (1件):
+
+  ロボット制御メモ (2026-05-10)
+    path: notes/robotics-control.md
+    tags: control, robotics
+    summary: PID とモデル予測制御の比較。
+

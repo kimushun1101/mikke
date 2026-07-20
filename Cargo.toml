@@ -1,0 +1,41 @@
+[package]
+name = "mikke"
+version = "0.1.0"
+edition = "2021"
+description = "Markdown ノート検索 CLI — SQLite FTS5 (trigram, 日本語対応) BM25 + optional ローカル embedding hybrid"
+license = "MIT"
+repository = "https://github.com/kimushun1101/mikke"
+readme = "README.md"
+
+[[bin]]
+name = "mikke"
+path = "src/main.rs"
+
+[features]
+default = []
+# semantic 検索 (embedding)。既定 OFF で BM25 のみの軽量ビルド。
+semantic = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:hf-hub", "dep:serde_json"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10"
+sha2 = "0.10"
+regex = "1"
+
+# --- semantic feature 専用 (既定ビルドには入らない) ---
+candle-core = { version = "0.8", optional = true }
+candle-nn = { version = "0.8", optional = true }
+candle-transformers = { version = "0.8", optional = true }
+tokenizers = { version = "0.20", optional = true }
+# default (native-tls) は openssl-dev 必須のため、rustls ベースの ureq 経路のみ有効化
+hf-hub = { version = "0.4", optional = true, default-features = false, features = ["ureq"] }
+# safetensors の読み書きは candle-core 経由 (candle_core::safetensors)。metadata.json 用に serde_json。
+serde_json = { version = "1", optional = true }
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1

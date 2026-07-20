@@ -1,0 +1,7 @@
+全文検索 '短い' の結果 (1件, date 降順 (短語を含み relevance 算出不可)):
+
+  短い (2026-06-01)
+    path: notes/short.md
+    tags: misc
+    summary: (なし — 要約未設定。内容は path を開いて確認)
+

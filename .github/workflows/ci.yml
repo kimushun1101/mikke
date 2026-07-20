@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --check
+      - name: clippy (default = BM25)
+        run: cargo clippy -- -D warnings
+      - name: test (default = BM25)
+        run: cargo test
+      - name: clippy (semantic feature)
+        run: cargo clippy --features semantic -- -D warnings
+      # モデル取得が必要な e2e は #[ignore] で CI から除外 (ローカルで -- --ignored)
+      - name: test (semantic feature)
+        run: cargo test --features semantic

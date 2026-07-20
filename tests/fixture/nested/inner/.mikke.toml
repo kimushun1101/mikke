@@ -1,0 +1,3 @@
+# 孫 repo (dotfile 設定の境界検知の確認も兼ねる)
+[scan]
+exclude_dirs = ["scratch"]

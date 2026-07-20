@@ -1,0 +1,27 @@
+[frontmatter 破損 (1件)]
+  broken/broken-fm.md  -- 閉じ---欠落: 終端 '---' が無く metadata が silent に喪失する
+
+[タグなし (3件)]
+  broken/broken-fm.md  -- broken-fm
+  notes/filename-title.md  -- filename-title
+  notes/no-frontmatter.md  -- 見出しからのタイトル
+
+[要約なし (4件)]
+  broken/broken-fm.md  -- broken-fm
+  notes/filename-title.md  -- filename-title
+  notes/no-frontmatter.md  -- 見出しからのタイトル
+  notes/short.md  -- 短い
+
+[低ボリューム: < 50 words (3件)]
+  notes/short.md  -- 短い (3 words)
+  broken/broken-fm.md  -- broken-fm (24 words)
+  notes/filename-title.md  -- filename-title (32 words)
+
+[updated未設定 (5件)]
+  broken/broken-fm.md  -- broken-fm
+  notes/filename-title.md  -- filename-title
+  notes/no-frontmatter.md  -- 見出しからのタイトル
+  notes/robotics-control.md  -- ロボット制御メモ
+  notes/short.md  -- 短い
+
+--- 合計: 8ノート中 16件の問題（重複あり）

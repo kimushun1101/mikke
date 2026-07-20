@@ -1,0 +1,27 @@
+最近のノート (上位5件):
+
+  短い (2026-06-01)
+    path: notes/short.md
+    tags: misc
+    summary: (なし — 要約未設定。内容は path を開いて確認)
+
+  ロボット制御メモ (2026-05-10)
+    path: notes/robotics-control.md
+    tags: control, robotics
+    summary: PID とモデル予測制御の比較。
+
+  SLAM の基礎 (2026-05-01)
+    path: notes/robotics-slam.md
+    tags: localization, robotics, slam
+    summary: 移動ロボットの自己位置推定と地図構築の基礎。
+
+  シマウマ観察ガイド (2026-04-10)
+    path: nested/notes/zebra-guide.md
+    tags: nested, zoology
+    summary: zebra の縞模様の観察手順のまとめ。
+
+  シマウマ孫ノート (2026-04-05)
+    path: nested/inner/zebra-inner.md
+    tags: inner, nested
+    summary: 孫 repo 側の zebra ノート。
+
