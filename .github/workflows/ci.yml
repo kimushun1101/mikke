@@ -17,11 +17,11 @@ jobs:
       - name: fmt
         run: cargo fmt --check
       - name: clippy (default = BM25)
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --locked -- -D warnings
       - name: test (default = BM25)
-        run: cargo test
+        run: cargo test --locked
       - name: clippy (semantic feature)
-        run: cargo clippy --features semantic -- -D warnings
+        run: cargo clippy --locked --features semantic -- -D warnings
       # モデル取得が必要な e2e は #[ignore] で CI から除外 (ローカルで -- --ignored)
       - name: test (semantic feature)
-        run: cargo test --features semantic
+        run: cargo test --locked --features semantic
