@@ -30,7 +30,7 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
@@ -54,7 +54,7 @@ jobs:
         run: |
           ext=""; [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
           cp "target/${{ matrix.target }}/release/mikke${ext}" "dist/mikke-full-${{ matrix.target }}${ext}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mikke-${{ matrix.target }}
           path: dist/*
@@ -64,13 +64,13 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
       - name: list artifacts
         run: ls -la dist
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: dist/*
