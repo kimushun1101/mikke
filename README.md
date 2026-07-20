@@ -29,7 +29,7 @@ cargo install --git https://github.com/kimushun1101/mikke --features semantic
 
 > 既に BM25 版を `cargo install` 済みの環境で semantic 版へ切り替える場合は、末尾に `--force` を付ける (既定では既存バイナリを上書きしないため)。
 
-Releases には target 別のビルド済みバイナリ (slim = BM25 のみ / full = semantic 入り) を置く。更新はバイナリ差し替え、または `cargo install` の再実行。
+Releases には target 別のビルド済みバイナリのアーカイブ (`mikke-{slim,full}-<target>.tar.gz` / Windows は `.zip`、slim = BM25 のみ / full = semantic 入り、`SHA256SUMS` 付き) を置く。展開して PATH の通った場所に置けばよい。更新はバイナリ差し替え、または `cargo install` の再実行。
 
 ## 使い方
 
