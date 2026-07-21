@@ -356,6 +356,26 @@ fn exclude_name_matches_at_any_depth() {
     );
 }
 
+// --- version (slim/full 判別) ---
+
+/// --version は subcommand 探索より前に判定され、slim ビルドでは従来通りの表記のまま。
+#[cfg(not(feature = "semantic"))]
+#[test]
+fn version_slim() {
+    let (stdout, stderr) = run_in(&std::env::temp_dir(), &["--version"]);
+    let expected = fs::read_to_string(golden_dir().join("version_slim.txt")).unwrap();
+    assert_eq!(stdout, expected, "stderr:\n{stderr}");
+}
+
+/// --version が semantic feature 有効ビルドでは判別可能な表記になる。
+#[cfg(feature = "semantic")]
+#[test]
+fn version_full() {
+    let (stdout, stderr) = run_in(&std::env::temp_dir(), &["--version"]);
+    let expected = fs::read_to_string(golden_dir().join("version_full.txt")).unwrap();
+    assert_eq!(stdout, expected, "stderr:\n{stderr}");
+}
+
 // --- semantic (embed / semantic / hybrid) ---
 
 /// semantic 無効 repo での embed は明示エラーで exit 1 (feature 有効ビルド)。

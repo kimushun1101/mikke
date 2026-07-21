@@ -13,10 +13,16 @@ mod search;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// slim/full どちらのビルドかを `--version` で判別できるようにする (semantic feature の有無)。
+#[cfg(feature = "semantic")]
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (+semantic)");
+#[cfg(not(feature = "semantic"))]
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Parser)]
 #[command(
     name = "mikke",
-    version,
+    version = VERSION,
     about = "Markdown ノート検索 CLI (BM25 + optional semantic hybrid, 日本語対応)"
 )]
 struct Cli {
