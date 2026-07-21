@@ -45,10 +45,11 @@ jobs:
           targets: ${{ matrix.target }}
       - name: check tag matches Cargo.toml version
         shell: bash
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
           ver="v$(cargo pkgid | sed 's/.*[@#]//')"
-          [ "$tag" = "$ver" ] || { echo "tag $tag != Cargo.toml $ver"; exit 1; }
+          [ "$TAG" = "$ver" ] || { echo "tag $TAG != Cargo.toml $ver"; exit 1; }
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
