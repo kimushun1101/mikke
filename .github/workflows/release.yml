@@ -22,6 +22,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          # musl 完全静的バイナリ: glibc バージョン非依存で任意の distro で動く
+          # (esaxx_fast を外したので musl-tools の musl-gcc のみでビルド可能)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: windows-latest
@@ -43,6 +47,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: install musl-tools (musl target)
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: check tag matches Cargo.toml version
         shell: bash
         env:
@@ -55,11 +62,17 @@ jobs:
           key: ${{ matrix.target }}
       - name: build slim (BM25)
         run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: verify static link (musl slim)
+        if: endsWith(matrix.target, '-musl')
+        run: file "target/${{ matrix.target }}/release/mikke" | grep -E "static-pie linked|statically linked"
       - name: package slim
         shell: bash
         run: bash .github/scripts/package.sh slim "${{ matrix.target }}"
       - name: build full (semantic)
         run: cargo build --release --locked --features semantic --target ${{ matrix.target }}
+      - name: verify static link (musl full)
+        if: endsWith(matrix.target, '-musl')
+        run: file "target/${{ matrix.target }}/release/mikke" | grep -E "static-pie linked|statically linked"
       - name: package full
         shell: bash
         run: bash .github/scripts/package.sh full "${{ matrix.target }}"

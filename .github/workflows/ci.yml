@@ -13,6 +13,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
       - name: fmt
         run: cargo fmt --check
@@ -25,3 +26,9 @@ jobs:
       # モデル取得が必要な e2e は #[ignore] で CI から除外 (ローカルで -- --ignored)
       - name: test (semantic feature)
         run: cargo test --locked --features semantic
+      # release の musl 静的ビルドがタグ作成時まで壊れに気づけないのを防ぐ
+      # (check はリンクを走らせないため、dev プロファイルの build でリンク段階まで検証)
+      - name: install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: build (semantic, musl)
+        run: cargo build --locked --features semantic --target x86_64-unknown-linux-musl
