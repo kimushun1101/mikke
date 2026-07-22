@@ -31,6 +31,8 @@ cargo install --git https://github.com/kimushun1101/mikke --features semantic
 
 Releases には target 別のビルド済みバイナリのアーカイブ (`mikke-{slim,full}-<target>.tar.gz` / Windows は `.zip`、slim = BM25 のみ / full = semantic 入り、`SHA256SUMS` 付き) を置く。展開して PATH の通った場所に置けばよい。更新はバイナリ差し替え、または `cargo install` の再実行。
 
+> Linux 用は `-gnu` (glibc 動的リンク) と `-musl` (完全静的リンク) の 2 系統がある。`-gnu` はビルド環境の glibc 以降が必要なため、古い distro で `GLIBC_X.YY not found` が出る場合は glibc バージョン非依存の `-musl` を使う。
+
 ## 使い方
 
 ```bash

@@ -62,11 +62,17 @@ jobs:
           key: ${{ matrix.target }}
       - name: build slim (BM25)
         run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: verify static link (musl slim)
+        if: endsWith(matrix.target, '-musl')
+        run: file "target/${{ matrix.target }}/release/mikke" | grep -E "static-pie linked|statically linked"
       - name: package slim
         shell: bash
         run: bash .github/scripts/package.sh slim "${{ matrix.target }}"
       - name: build full (semantic)
         run: cargo build --release --locked --features semantic --target ${{ matrix.target }}
+      - name: verify static link (musl full)
+        if: endsWith(matrix.target, '-musl')
+        run: file "target/${{ matrix.target }}/release/mikke" | grep -E "static-pie linked|statically linked"
       - name: package full
         shell: bash
         run: bash .github/scripts/package.sh full "${{ matrix.target }}"
