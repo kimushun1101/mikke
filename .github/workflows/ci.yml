@@ -26,8 +26,9 @@ jobs:
       # モデル取得が必要な e2e は #[ignore] で CI から除外 (ローカルで -- --ignored)
       - name: test (semantic feature)
         run: cargo test --locked --features semantic
-      # release の musl 静的ビルドがタグ作成時まで壊れに気づけないのを防ぐ (コンパイル回帰検知)
+      # release の musl 静的ビルドがタグ作成時まで壊れに気づけないのを防ぐ
+      # (check はリンクを走らせないため、dev プロファイルの build でリンク段階まで検証)
       - name: install musl-tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: check (semantic, musl)
-        run: cargo check --locked --features semantic --target x86_64-unknown-linux-musl
+      - name: build (semantic, musl)
+        run: cargo build --locked --features semantic --target x86_64-unknown-linux-musl
