@@ -51,6 +51,16 @@ done
 command -v curl >/dev/null 2>&1 || err "curl が必要"
 command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || err "sha256sum か shasum が必要"
 
+case "$VARIANT" in
+  slim|full) ;;
+  *) err "VARIANT は slim か full (指定値: $VARIANT)" ;;
+esac
+case "$VERSION" in
+  latest|v*) ;;
+  [0-9]*) VERSION="v$VERSION" ;;
+  *) err "VERSION の形式が不正 (例: v0.2.0)" ;;
+esac
+
 # target 自動判定。Linux は glibc バージョン非依存の musl (完全静的リンク) を既定にする
 if [ -z "$TARGET" ]; then
   os=$(uname -s)
@@ -63,13 +73,16 @@ if [ -z "$TARGET" ]; then
 fi
 
 archive="mikke-${VARIANT}-${TARGET}.tar.gz"
-if [ "$VERSION" = "latest" ]; then
-  base="https://github.com/${REPO}/releases/latest/download"
-else
-  base="https://github.com/${REPO}/releases/download/${VERSION}"
-fi
 
-tmp=$(mktemp -d)
+# latest はタグ名に解決してから使う (アーカイブと SHA256SUMS の取得の合間に
+# 新 release が出ても世代がずれないよう、以降は固定タグの URL で取得する)
+if [ "$VERSION" = "latest" ]; then
+  VERSION=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" | sed -n 's|.*/tag/||p')
+  [ -n "$VERSION" ] || err "latest バージョンの解決に失敗"
+fi
+base="https://github.com/${REPO}/releases/download/${VERSION}"
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/mikke-install.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 printf '%s\n' "download: $base/$archive"
@@ -77,15 +90,18 @@ curl -fsSL -o "$tmp/$archive" "$base/$archive" \
   || err "ダウンロード失敗。この target/version の組に asset が無い可能性 (Releases を確認)"
 curl -fsSL -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" || err "SHA256SUMS の取得に失敗"
 
-# checksum 検証 (Linux: sha256sum / macOS: shasum)
-checksum_line=$(grep -F -- "$archive" "$tmp/SHA256SUMS") || err "SHA256SUMS に $archive の行が無い"
+# checksum 検証 (Linux: sha256sum / macOS: shasum)。ファイル名はフィールド完全一致で照合
+checksum_line=$(awk -v f="$archive" '$2 == f' "$tmp/SHA256SUMS")
+[ -n "$checksum_line" ] || err "SHA256SUMS に $archive の行が無い"
 if command -v sha256sum >/dev/null 2>&1; then
   printf '%s\n' "$checksum_line" | (cd "$tmp" && sha256sum -c -) >/dev/null || err "checksum 不一致"
 else
   printf '%s\n' "$checksum_line" | (cd "$tmp" && shasum -a 256 -c -) >/dev/null || err "checksum 不一致"
 fi
 
-tar xzf "$tmp/$archive" -C "$tmp"
+# mikke メンバーだけを展開し、通常ファイルであることを確認してから配置する
+tar xzf "$tmp/$archive" -C "$tmp" mikke
+{ [ -f "$tmp/mikke" ] && [ ! -L "$tmp/mikke" ]; } || err "アーカイブの内容が想定と異なる (mikke が通常ファイルでない)"
 mkdir -p "$INSTALL_DIR"
 install -m 755 "$tmp/mikke" "$INSTALL_DIR/mikke"
 

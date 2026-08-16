@@ -32,3 +32,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: build (semantic, musl)
         run: cargo build --locked --features semantic --target x86_64-unknown-linux-musl
+
+  install-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: shellcheck
+        run: shellcheck install.sh
+      - name: dash syntax
+        run: dash -n install.sh
