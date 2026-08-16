@@ -52,10 +52,17 @@ try {
     $Actual = (Get-FileHash (Join-Path $Tmp $Archive) -Algorithm SHA256).Hash.ToLower()
     if ($Expected -ne $Actual) { throw "checksum 不一致" }
 
-    # mikke.exe が通常ファイルとして展開されたことを確認してから配置する
-    Expand-Archive -Path (Join-Path $Tmp $Archive) -DestinationPath $Tmp
+    # zip 全展開はせず mikke.exe エントリだけを明示パスへ抽出する (パストラバーサル対策)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
     $Exe = Join-Path $Tmp "mikke.exe"
-    if (-not (Test-Path $Exe -PathType Leaf)) { throw "アーカイブの内容が想定と異なる (mikke.exe が無い)" }
+    $Zip = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $Tmp $Archive))
+    try {
+        $Entry = $Zip.Entries | Where-Object { $_.FullName -eq "mikke.exe" } | Select-Object -First 1
+        if (-not $Entry) { throw "アーカイブの内容が想定と異なる (mikke.exe が無い)" }
+        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $Exe, $true)
+    }
+    finally { $Zip.Dispose() }
+    if (-not (Test-Path $Exe -PathType Leaf)) { throw "mikke.exe の抽出に失敗" }
 
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     Copy-Item $Exe (Join-Path $InstallDir "mikke.exe") -Force
