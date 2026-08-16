@@ -56,6 +56,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: run install.sh
         run: sh install.sh --to "$RUNNER_TEMP/bin"
+      - name: run install.sh (slim)
+        run: sh install.sh --slim --to "$RUNNER_TEMP/bin-slim"
 
   install-smoke-windows:
     runs-on: windows-latest

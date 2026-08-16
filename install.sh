@@ -3,14 +3,14 @@
 # SHA256SUMS で検証してから配置する。
 #
 #   curl -fsSL https://raw.githubusercontent.com/kimushun1101/mikke/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/kimushun1101/mikke/main/install.sh | sh -s -- --full
+#   curl -fsSL https://raw.githubusercontent.com/kimushun1101/mikke/main/install.sh | sh -s -- --slim
 #
 # 対象は Linux (x86_64) と macOS (Apple Silicon)。Windows は install.ps1、
 # それ以外は cargo install か手動導入 (README 参照)。
 set -eu
 
 REPO="kimushun1101/mikke"
-VARIANT="${MIKKE_VARIANT:-slim}"
+VARIANT="${MIKKE_VARIANT:-full}"
 VERSION="${MIKKE_VERSION:-latest}"
 INSTALL_DIR="${MIKKE_INSTALL_DIR:-$HOME/.local/bin}"
 TARGET="${MIKKE_TARGET:-}"
@@ -20,8 +20,8 @@ usage() {
 usage: install.sh [options]
 
 options:
-  --slim            BM25 のみの slim 版を入れる (既定)
-  --full            semantic 検索入りの full 版を入れる
+  --full            semantic 検索入りの full 版を入れる (既定)
+  --slim            BM25 のみの slim 版を入れる (最小サイズ)
   --version vX.Y.Z  インストールするバージョン (既定: latest)
   --to DIR          配置先ディレクトリ (既定: ~/.local/bin)
   --target TRIPLE   target triple の手動指定 (例: x86_64-unknown-linux-gnu)

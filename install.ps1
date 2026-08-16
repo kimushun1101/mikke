@@ -5,7 +5,7 @@
 #   irm https://raw.githubusercontent.com/kimushun1101/mikke/main/install.ps1 | iex
 #
 # オプションは環境変数で指定する (iex 経由ではパラメータを渡せないため):
-#   $env:MIKKE_VARIANT     = "full"      # slim (既定) / full
+#   $env:MIKKE_VARIANT     = "slim"      # full (既定) / slim
 #   $env:MIKKE_VERSION     = "v0.2.0"    # 既定: latest
 #   $env:MIKKE_INSTALL_DIR = "C:/tools"  # 既定: $env:LOCALAPPDATA/Programs/mikke
 #
@@ -14,7 +14,7 @@
 $ErrorActionPreference = "Stop"
 
 $Repo = "kimushun1101/mikke"
-$Variant = if ($env:MIKKE_VARIANT) { $env:MIKKE_VARIANT } else { "slim" }
+$Variant = if ($env:MIKKE_VARIANT) { $env:MIKKE_VARIANT } else { "full" }
 $Version = if ($env:MIKKE_VERSION) { $env:MIKKE_VERSION } else { "latest" }
 $InstallDir = if ($env:MIKKE_INSTALL_DIR) { $env:MIKKE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\mikke" }
 

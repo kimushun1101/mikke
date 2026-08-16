@@ -21,7 +21,7 @@ Linux (x86_64) / macOS (Apple Silicon) はインストールスクリプトで�
 curl -fsSL https://raw.githubusercontent.com/kimushun1101/mikke/main/install.sh | sh
 ```
 
-semantic 検索入りの full 版は `| sh -s -- --full`、配置先やバージョン固定などのオプションは `install.sh --help` を参照。
+既定で semantic 検索入りの full 版が入る。BM25 のみの slim 版は `| sh -s -- --slim`、配置先やバージョン固定などのオプションは `install.sh --help` を参照。
 
 Windows (x86_64) は PowerShell で:
 
@@ -29,11 +29,11 @@ Windows (x86_64) は PowerShell で:
 irm https://raw.githubusercontent.com/kimushun1101/mikke/main/install.ps1 | iex
 ```
 
-full 版などのオプションは環境変数で指定する (`install.ps1` 冒頭のコメント参照)。
+slim 版への切り替えなどのオプションは環境変数で指定する (`install.ps1` 冒頭のコメント参照)。
 
 > バイナリは `SHA256SUMS` で検証されるが、入口の `install.sh` / `install.ps1` 自体は main 追従で取得される。入口も固定したい場合は commit SHA 付き raw URL を使う。
 
-cargo でビルドして入れる場合。BM25 のみ (即起動・依存ゼロ):
+cargo でビルドして入れる場合 (既定はスクリプトと違い BM25 のみ)。BM25 のみ (即起動・依存ゼロ):
 
 ```bash
 cargo install --git https://github.com/kimushun1101/mikke
