@@ -41,3 +41,9 @@ jobs:
         run: shellcheck install.sh
       - name: dash syntax
         run: dash -n install.sh
+      - name: pwsh syntax
+        run: |
+          pwsh -NoProfile -Command '
+            $t = $null; $e = $null
+            [System.Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$t, [ref]$e) | Out-Null
+            if ($e.Count) { $e | ForEach-Object { Write-Error $_.Message }; exit 1 }'

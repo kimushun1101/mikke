@@ -23,6 +23,14 @@ curl -fsSL https://raw.githubusercontent.com/kimushun1101/mikke/main/install.sh 
 
 semantic 検索入りの full 版は `| sh -s -- --full`、配置先やバージョン固定などのオプションは `install.sh --help` を参照。
 
+Windows (x86_64) は PowerShell で:
+
+```powershell
+irm https://raw.githubusercontent.com/kimushun1101/mikke/main/install.ps1 | iex
+```
+
+full 版などのオプションは環境変数で指定する (`install.ps1` 冒頭のコメント参照)。
+
 cargo でビルドして入れる場合。BM25 のみ (即起動・依存ゼロ):
 
 ```bash
