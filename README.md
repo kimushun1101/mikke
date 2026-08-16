@@ -31,6 +31,8 @@ irm https://raw.githubusercontent.com/kimushun1101/mikke/main/install.ps1 | iex
 
 full 版などのオプションは環境変数で指定する (`install.ps1` 冒頭のコメント参照)。
 
+> バイナリは `SHA256SUMS` で検証されるが、入口の `install.sh` / `install.ps1` 自体は main 追従で取得される。入口も固定したい場合は commit SHA 付き raw URL を使う。
+
 cargo でビルドして入れる場合。BM25 のみ (即起動・依存ゼロ):
 
 ```bash

@@ -21,9 +21,10 @@ $InstallDir = if ($env:MIKKE_INSTALL_DIR) { $env:MIKKE_INSTALL_DIR } else { Join
 if (@("slim", "full") -notcontains $Variant) { throw "MIKKE_VARIANT は slim か full (指定値: $Variant)" }
 if ($Version -match "^[0-9]") { $Version = "v$Version" }
 
-# arch 判定 (Windows 向けは x86_64 のみ配布)
-if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
-    throw "未対応の CPU: $($env:PROCESSOR_ARCHITECTURE) (x86_64 のみ配布。cargo install を使う)"
+# arch 判定 (Windows 向けは x86_64 のみ配布)。32-bit PowerShell からでも WOW64 環境変数で 64-bit OS を判定する
+$Arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+if ($Arch -ne "AMD64") {
+    throw "未対応の CPU: $Arch (x86_64 のみ配布。cargo install を使う)"
 }
 $Target = "x86_64-pc-windows-msvc"
 $Archive = "mikke-$Variant-$Target.zip"

@@ -47,3 +47,23 @@ jobs:
             $t = $null; $e = $null
             [System.Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$t, [ref]$e) | Out-Null
             if ($e.Count) { $e | ForEach-Object { Write-Error $_.Message }; exit 1 }'
+
+  # 実 Releases に対する smoke。Linux は latest 解決込み、Windows は既存タグ固定
+  # (api.github.com の共有 runner での rate limit を避けるため)
+  install-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: run install.sh
+        run: sh install.sh --to "$RUNNER_TEMP/bin"
+
+  install-smoke-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: run install.ps1
+        shell: pwsh
+        run: |
+          $env:MIKKE_VERSION = "v0.2.0"
+          $env:MIKKE_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "bin"
+          ./install.ps1

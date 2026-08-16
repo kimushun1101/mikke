@@ -57,7 +57,7 @@ case "$VARIANT" in
   *) err "VARIANT は slim か full (指定値: $VARIANT)" ;;
 esac
 case "$VERSION" in
-  latest|v*) ;;
+  latest|v[0-9]*) ;;
   [0-9]*) VERSION="v$VERSION" ;;
   *) err "VERSION の形式が不正 (例: v0.2.0)" ;;
 esac
