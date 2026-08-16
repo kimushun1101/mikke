@@ -96,7 +96,7 @@ curl -fsSL -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" || err "SHA256SUMS の取得�
 
 # checksum 検証 (Linux: sha256sum / macOS: shasum)。ファイル名はフィールド完全一致で照合
 # ("*" 付きのバイナリモード形式にも耐える)
-checksum_line=$(awk -v f="$archive" '$2 == f || $2 == "*" f' "$tmp/SHA256SUMS")
+checksum_line=$(awk -v f="$archive" '$2 == f || $2 == ("*" f)' "$tmp/SHA256SUMS")
 [ -n "$checksum_line" ] || err "SHA256SUMS に $archive の行が無い"
 if command -v sha256sum >/dev/null 2>&1; then
   printf '%s\n' "$checksum_line" | (cd "$tmp" && sha256sum -c -) >/dev/null || err "checksum 不一致"
