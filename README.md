@@ -15,7 +15,25 @@ Markdown ノートの入ったフォルダ (YAML frontmatter + wikilink、Obsidi
 
 ## インストール
 
-BM25 のみ (即起動・依存ゼロ):
+Linux (x86_64) / macOS (Apple Silicon) はインストールスクリプトで入る (Releases から自環境向けバイナリを取得し、`SHA256SUMS` を検証して `~/.local/bin` に配置):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kimushun1101/mikke/main/install.sh | sh
+```
+
+既定で semantic 検索入りの full 版が入る。BM25 のみの slim 版は `| sh -s -- --slim`、配置先やバージョン固定などのオプションは `install.sh --help` を参照。
+
+Windows (x86_64) は PowerShell で:
+
+```powershell
+irm https://raw.githubusercontent.com/kimushun1101/mikke/main/install.ps1 | iex
+```
+
+slim 版への切り替えなどのオプションは環境変数で指定する (`install.ps1` 冒頭のコメント参照)。
+
+> バイナリは `SHA256SUMS` で検証されるが、入口の `install.sh` / `install.ps1` 自体は main 追従で取得される。入口も固定したい場合は commit SHA 付き raw URL を使う。
+
+cargo でビルドして入れる場合 (既定はスクリプトと違い BM25 のみ)。BM25 のみ (即起動・依存ゼロ):
 
 ```bash
 cargo install --git https://github.com/kimushun1101/mikke
