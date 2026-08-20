@@ -68,11 +68,16 @@ impl Meta {
 
 /// 1 行分の JSON を stdout へ出す (JSON モードの唯一の stdout 出口)。
 fn print_json<T: serde::Serialize>(value: &T) {
-    println!(
-        "{}",
-        // serialize 対象は String/bool/usize/有限 f64 のみで to_string は失敗しない (expect は到達不能)。
-        serde_json::to_string(value).expect("JSON への変換に失敗")
-    );
+    // 通常経路の値 (String/bool/usize/f64) では to_string は失敗しない (非有限 f64 も
+    // serde_json は Err でなく null として出力する)。それでも Err が返る異常値では
+    // panic (exit 101) で落とさず、エラー規約 (docs/SPEC.md「exit code」) の exit 2 で終了する。
+    match serde_json::to_string(value) {
+        Ok(line) => println!("{line}"),
+        Err(e) => {
+            eprintln!("Error: JSON への変換に失敗しました ({e})。");
+            std::process::exit(2);
+        }
+    }
 }
 
 pub fn connect(cfg: &Config) -> Connection {
