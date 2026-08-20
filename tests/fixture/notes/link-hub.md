@@ -9,7 +9,7 @@ summary: wikilink の解決規則を確認する起点ノート。
 # リンク集
 
 見出しだけのノート [[no-frontmatter|FM無し]] と、fragment 付きの [[filename-title#由来]] を張る。
-パス形式の [[notes/short]] と、どのノートにも解決できない [[missing-note]] も並べておく。
+パス形式の [[notes/short.md]] と、どのノートにも解決できない [[missing-note]] も並べておく。
 自ノート内アンカー [[#規則]] はリンク先の対象にならない。
 
 ## 規則

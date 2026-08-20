@@ -408,10 +408,11 @@ fn all_note_paths(conn: &Connection) -> Vec<String> {
     rows.flatten().collect()
 }
 
-/// wikilink target からノート部を取り出す (`#fragment` は照合前に除去)。
+/// wikilink target からノート部を取り出す (`#fragment` と末尾の `.md` は照合前に除去)。
 /// ノート部が空 (`[[#anchor]]`) は自ノート内アンカーで対象外 → None。
 fn target_note_part(target: &str) -> Option<&str> {
     let note = target.split('#').next().unwrap_or(target);
+    let note = note.strip_suffix(".md").unwrap_or(note);
     if note.is_empty() {
         None
     } else {
@@ -695,4 +696,41 @@ pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize, json: bool) -> usize {
     }
     print_notes(&notes, json);
     notes.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 成分末尾一致は `/` 境界で切る — 文字列 suffix 一致 (`[[note]]` が
+    /// `notes/my-note.md` に当たる類の偽陽性) を否定する。
+    #[test]
+    fn target_matches_component_boundary_not_string_suffix() {
+        assert!(!target_matches("notes/my-note.md", "note"));
+        assert!(!target_matches("notes/my-note.md", "tes/my-note"));
+        assert!(target_matches("notes/my-note.md", "my-note"));
+        assert!(target_matches("notes/my-note.md", "notes/my-note"));
+    }
+
+    /// target 末尾の `.md` は fragment と同じ前処理で除く —
+    /// `[[notes/short.md]]` 形式が path 側の `.md` 除去と対で解決される。
+    #[test]
+    fn target_note_part_strips_trailing_md() {
+        assert_eq!(target_note_part("notes/short.md"), Some("notes/short"));
+        assert_eq!(target_note_part("short.md"), Some("short"));
+        // fragment → `.md` の順で除く
+        assert_eq!(target_note_part("notes/short.md#sec"), Some("notes/short"));
+    }
+
+    /// `#fragment` は照合前に除去され、fragment 付き target が解決できる。
+    /// ノート部が空 (`[[#anchor]]`) の対象外化は fixture link-hub.md の
+    /// `[[#規則]]` + golden links_hub.txt (target 4件) が e2e で固定済み。
+    #[test]
+    fn target_note_part_strips_fragment() {
+        assert_eq!(target_note_part("x#sec"), Some("x"));
+        assert_eq!(
+            target_note_part("filename-title#由来"),
+            Some("filename-title")
+        );
+    }
 }
