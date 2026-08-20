@@ -616,6 +616,42 @@ fn health_disable_unknown_name_errors() {
     );
 }
 
+/// disable = ["frontmatter"] は health の報告だけを止め、
+/// index --check の破損検出 (非 0 終了) はゲートしない。
+#[test]
+fn index_check_ignores_frontmatter_disable() {
+    let root = temp_repo(
+        "health-disable-fm-check",
+        &[
+            ("mikke.toml", "[health]\ndisable = [\"frontmatter\"]\n"),
+            // 閉じ --- が無い破損 frontmatter
+            ("notes/broken.md", "---\ntitle: Broken\n\n# 本文\n"),
+        ],
+    );
+    run(&root, &["index"]);
+    let health = run_raw(&root, &["health"]);
+    let health_stdout = String::from_utf8_lossy(&health.stdout).into_owned();
+    let check = run_raw(&root, &["index", "--check"]);
+    let check_stderr = String::from_utf8_lossy(&check.stderr).into_owned();
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        health.status.success(),
+        "health が非 0 で終了した:\n{health_stdout}"
+    );
+    assert!(
+        !health_stdout.contains("frontmatter 破損"),
+        "disable しても health が破損を報告している:\n{health_stdout}"
+    );
+    assert!(
+        !check.status.success(),
+        "破損があるのに index --check が成功してしまった:\n{check_stderr}"
+    );
+    assert!(
+        check_stderr.contains("frontmatter 破損"),
+        "index --check の破損エラーメッセージが無い:\n{check_stderr}"
+    );
+}
+
 /// health --md-report の生成ファイルを golden と比較 (決定的・可搬リンク)。
 #[test]
 fn golden_md_report() {

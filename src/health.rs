@@ -165,8 +165,8 @@ pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
         rows_filtered(
             &conn,
             "SELECT n.path, n.title FROM notes n
-             WHERE NOT EXISTS (SELECT 1 FROM tags t WHERE t.path = n.path)
-             ORDER BY n.path",
+         WHERE NOT EXISTS (SELECT 1 FROM tags t WHERE t.path = n.path)
+         ORDER BY n.path",
             &cfg.quality_skip_prefixes,
         )
     };
