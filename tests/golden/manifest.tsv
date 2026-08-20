@@ -1,3 +1,6 @@
+backlinks_control	backlinks robotics-control
+backlinks_short	backlinks notes/short.md
+backlinks_zero	backlinks nested/notes/zebra-guide.md
 find_bm25	find slam
 find_bm25_json	find slam --json
 find_like_fallback	find robotics 制御
@@ -9,6 +12,9 @@ find_zero_json	find mpc 1ms --json
 health	health
 hybrid_degrade	hybrid ロボット 制御 --top 3
 hybrid_degrade_json	hybrid ロボット 制御 --top 3 --json
+links_hub	links notes/link-hub.md
+links_slam	links robotics-slam
+links_zero	links notes/short.md
 list_tags	list-tags
 list_tags_json	list-tags --json
 recent	recent 5

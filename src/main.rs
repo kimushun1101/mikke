@@ -106,6 +106,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// 発リンク一覧 (対象ノートの wikilink をリンク先ノートへ解決して表示)
+    Links {
+        #[arg(value_name = "ノート")]
+        note: String,
+    },
+    /// 被リンク一覧 (対象ノートへ wikilink を張るノートを表示)
+    Backlinks {
+        #[arg(value_name = "ノート")]
+        note: String,
+    },
     /// ノート repo の健全性チェック
     Health {
         /// 決定的な md レポートも書き出す
@@ -119,8 +129,9 @@ fn main() {
     let root = config::resolve_root(cli.root.as_deref());
     let cfg = config::load_config(root);
 
-    // 検索系 (find/tag/title/semantic/hybrid) はヒット件数を返し、0 件なら grep 慣習で
-    // exit 1 にする (docs/SPEC.md「exit code」)。一覧系等は 0 件も正常な状態報告なので None。
+    // 検索系 (find/tag/title/semantic/hybrid) と links/backlinks は結果件数を返し、
+    // 0 件なら grep 慣習で exit 1 にする (docs/SPEC.md「exit code」)。
+    // 一覧系等は 0 件も正常な状態報告なので None。
     let hits: Option<usize> = match cli.command {
         Command::Index { check } => {
             index::cmd_index(&cfg, check);
@@ -143,6 +154,8 @@ fn main() {
         Command::Hybrid { query, top, json } => {
             Some(search::cmd_hybrid(&cfg, &query.join(" "), top, json))
         }
+        Command::Links { note } => Some(search::cmd_links(&cfg, &note)),
+        Command::Backlinks { note } => Some(search::cmd_backlinks(&cfg, &note)),
         Command::Health { md_report } => {
             health::cmd_health(&cfg, md_report.as_deref());
             None
