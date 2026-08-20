@@ -101,7 +101,7 @@ mikke hybrid 発振 対策      # BM25 と semantic の RRF 融合
 
 mikke は AI コーディングエージェントにノート資産を検索させる用途を主眼にしている。組み込みは 2 段階:
 
-1. **指示書にスニペットを貼る** — [examples/agents/mikke.md](examples/agents/mikke.md) を、ノートフォルダの `CLAUDE.md` / `AGENTS.md` など使っているツールが読む指示書にそのまま貼る。root 解決・find のクエリセマンティクス・0 件時のフォールバック・検証手順まで含むツール非依存の検索手順で、どのエージェント CLI でも使える。
+1. **指示書にスニペットを貼る** — [examples/agents/mikke.md](examples/agents/mikke.md) を、ノートフォルダの `CLAUDE.md` / `AGENTS.md` など使っているツールが読む指示書にそのまま貼る。ツール非依存の検索手順 (root 解決から検証まで) で、どのエージェント CLI でも使える。
 
 2. **再利用可能な手順書として組み込む** — ツールが手順書の仕組みを持つ場合 (例: Claude Code の skill) は、[examples/skills/mikke/SKILL.md](examples/skills/mikke/SKILL.md) を土台にできる。起動条件・find のクエリセマンティクス (語ごと quote の AND 連結)・0 件時のフォールバック手順 (find → hybrid → Grep) まで含む実戦形の例なので、自分の運用・ツールに合わせて調整して使う (Claude Code ならノートフォルダの `.claude/skills/mikke/SKILL.md` にコピー)。
 

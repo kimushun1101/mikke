@@ -2,9 +2,7 @@
 
 ノートフォルダの `AGENTS.md` / `CLAUDE.md` にそのまま貼れる、ツール非依存の検索手順 (運用に合わせ調整可)。出典: https://github.com/kimushun1101/mikke (examples/agents 同梱例)。検索セマンティクスの正本は同 repo の docs/SPEC.md。index / embed / health の定期メンテはスニペットに含めない — docs/concept.md「運用フローイメージ」を参照。
 
-以下を貼る (見出しレベルは貼り先に合わせて調整する):
-
----
+--- ここから下を貼り付ける (見出しレベルは貼り先に合わせて調整する) ---
 
 ## ノート検索 (mikke)
 
@@ -16,7 +14,7 @@
 
 ### 検索ルール
 
-- index (`.mikke/index.sqlite`) は binary。直接読まず、常にコマンド経由で使う
+- `.mikke/` 配下は検索用の内部データ (index 等の binary)。直接読まず、検索は必ず mikke コマンド経由で行う
 - ヒットの title/tags/summary で当たりを付け、必要なノートだけ path を開いて読む。全件読み禁止
 - find の対象は title + 本文のみ。tags/summary だけの語は find に当たらない (`tag` / `title` で引く)
 - 複数語は各語 phrase quote の AND 連結。全語共起が必要で、語を増やすほど絞られる。3 文字未満の語が混ざると relevance 無しの date 降順 (出力に明示される)
