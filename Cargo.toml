@@ -16,13 +16,16 @@ path = "src/main.rs"
 [features]
 default = []
 # semantic 検索 (embedding)。既定 OFF で BM25 のみの軽量ビルド。
-semantic = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:hf-hub", "dep:serde_json"]
+semantic = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:hf-hub"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
+# --json (JSON Lines) 出力用。エスケープの手書きは安定インターフェースには危険なため serde 経由で固定
+# (semantic feature の metadata.json でも使用)。実行時初期化は無く即起動方針と衝突しない。
+serde_json = "1"
 serde_yaml_ng = "0.10"
 sha2 = "0.10"
 regex = "1"
@@ -36,9 +39,8 @@ candle-transformers = { version = "0.8", optional = true }
 # これで C++ 依存が消え、musl static ビルドが musl-gcc (musl-tools) のみで通る。
 tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
 # default (native-tls) は openssl-dev 必須のため、rustls ベースの ureq 経路のみ有効化
+# (safetensors の読み書きは candle-core 経由 = candle_core::safetensors)
 hf-hub = { version = "0.4", optional = true, default-features = false, features = ["ureq"] }
-# safetensors の読み書きは candle-core 経由 (candle_core::safetensors)。metadata.json 用に serde_json。
-serde_json = { version = "1", optional = true }
 
 [profile.release]
 lto = true

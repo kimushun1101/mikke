@@ -1,0 +1,2 @@
+{"type":"meta","command":"hybrid","count":1,"degraded":true}
+{"path":"notes/robotics-control.md","title":"ロボット制御メモ","date":"2026-05-10","tags":["control","robotics"],"summary":"PID とモデル予測制御の比較。","score":0.01639344262295082,"via":"bm25"}
