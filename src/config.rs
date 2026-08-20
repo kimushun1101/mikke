@@ -47,6 +47,9 @@ const DEFAULT_INDEX_PATH: &str = ".mikke/index.sqlite";
 const DEFAULT_EMBEDDINGS_DIR: &str = ".mikke/embeddings";
 const DEFAULT_MODEL: &str = "intfloat/multilingual-e5-small";
 
+/// [health] disable で指定できるチェック名 (docs/SPEC.md「health 判定」)。
+const HEALTH_CHECK_NAMES: &[&str] = &["frontmatter", "tags", "summary", "low_words", "updated"];
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub root: PathBuf,
@@ -73,6 +76,7 @@ pub struct Config {
     pub quality_skip_prefixes: Vec<String>,
     pub min_words: i64,
     pub exec_bit_prefixes: Vec<String>,
+    pub disable: Vec<String>,
     // 出力先 (index/embeddings) 配下を走査から除外する root 相対 prefix (自動算出)
     pub exclude_path_prefixes: Vec<String>,
 }
@@ -102,6 +106,7 @@ impl Config {
             quality_skip_prefixes: vec![],
             min_words: 50,
             exec_bit_prefixes: vec![],
+            disable: vec![],
             exclude_path_prefixes: vec![],
         }
     }
@@ -112,6 +117,11 @@ impl Config {
 
     pub fn embeddings_dir(&self) -> PathBuf {
         self.root.join(&self.embeddings_rel)
+    }
+
+    /// [health] disable に挙げられたチェックか (許容名の検査は load_config 側)。
+    pub fn health_disabled(&self, check: &str) -> bool {
+        self.disable.iter().any(|d| d == check)
     }
 }
 
@@ -358,6 +368,19 @@ pub fn load_config(root: PathBuf) -> Config {
             "exec_bit_prefixes",
             cfg.exec_bit_prefixes,
         );
+        cfg.disable = str_list(p, &health, "health", "disable", cfg.disable);
+        // 未知名は typo を silent no-op にせず即エラー終了する (「設定読み込みの厳格さ」)
+        for name in &cfg.disable {
+            if !HEALTH_CHECK_NAMES.contains(&name.as_str()) {
+                config_error(
+                    p,
+                    &format!(
+                        "[health] disable に未知のチェック名 \"{name}\" (指定可能: {})",
+                        HEALTH_CHECK_NAMES.join(", ")
+                    ),
+                );
+            }
+        }
     }
 
     // git 内部と mikke 既定出力ディレクトリは設定によらず常に走査対象外

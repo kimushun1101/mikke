@@ -570,6 +570,52 @@ fn semantic_e2e() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// [health] disable でチェックを項目単位で無効化できる (frontmatter 無し md 運用)。
+#[test]
+fn health_disable_checks() {
+    let root = temp_repo(
+        "health-disable",
+        &[
+            (
+                "mikke.toml",
+                // 低ボリュームは min_words = 0 で発火させない (disable との併用例)
+                "[health]\ndisable = [\"tags\", \"summary\", \"updated\"]\nmin_words = 0\n",
+            ),
+            (
+                "notes/plain.md",
+                "# Plain\n\nfrontmatter を持たない運用のノート。\n",
+            ),
+        ],
+    );
+    run(&root, &["index"]);
+    let (stdout, stderr) = run(&root, &["health"]);
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        stdout.contains("問題のあるノートはありません。"),
+        "disable が効いていない:\n{stdout}\n{stderr}"
+    );
+}
+
+/// [health] disable の未知チェック名は typo を silent no-op にせず非 0 で終了する。
+#[test]
+fn health_disable_unknown_name_errors() {
+    let root = temp_repo(
+        "health-disable-unknown",
+        &[
+            ("mikke.toml", "[health]\ndisable = [\"tag\"]\n"),
+            ("notes/a.md", "# A\n\nメモ。\n"),
+        ],
+    );
+    let out = run_raw(&root, &["health"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = fs::remove_dir_all(&root);
+    assert!(!out.status.success(), "未知のチェック名で成功してしまった");
+    assert!(
+        stderr.contains("未知のチェック名") && stderr.contains("tag"),
+        "未知チェック名のエラーメッセージが無い:\n{stderr}"
+    );
+}
+
 /// health --md-report の生成ファイルを golden と比較 (決定的・可搬リンク)。
 #[test]
 fn golden_md_report() {
