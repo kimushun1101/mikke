@@ -126,7 +126,7 @@ score/via は semantic/hybrid のみ。**summary 欠落を空白で黙らせな�
 - **frontmatter 破損**: index 非依存で filesystem を直接スキャン(古い index に騙されない)。判定: 先頭が `---` で始まるのに閉じ `---` が無い → 「閉じ---欠落」。YAML パース失敗 → 「YAMLエラー」。読込不可 → その旨。先頭 `---` 無しは破損ではない(タグ/要約欠落として別途拾う)。
 - **実行bit欠落**: `exec_bit_prefixes` 配下の tracked `*.sh` の git index mode が `100755` でないものを検出。`git -C root -c core.quotepath=off ls-files -s -- <prefixes>` を UTF-8 で読む(後述の encoding 注意)。index(tree) 依存でホスト非依存 → レポートに含めて commit 経由通知に乗せる。
 - **品質チェック(index ベース)**: タグなし / 要約なし / `word_count < min_words` / updated 未設定。各々 `quality_skip_prefixes` を適用。
-- **チェックの無効化(`disable`)**: `[health] disable` に挙げたチェック名を項目単位でスキップする(既定は空 = 全チェック有効)。許容名は `frontmatter` / `tags` / `summary` / `low_words` / `updated` の 5 種。未知名は「設定読み込みの厳格さ」に従い即エラー終了する(typo を silent no-op にしない)。効くのは health コマンドのみで、`mikke index --check` の非 0 終了や index build 時の警告は変わらない(CI 併用時の混乱防止)。実行bit欠落は `exec_bit_prefixes` による opt-in、index 鮮度は情報表示のため対象外。
+- **チェックの無効化(`disable`)**: `[health] disable` に挙げたチェック名を項目単位でスキップする(既定は空 = 全チェック有効)。許容名は `frontmatter` / `tags` / `summary` / `low_words` / `updated` の 5 種(完全一致・大文字小文字を区別)。未知名は「設定読み込みの厳格さ」に従い即エラー終了する(typo を silent no-op にしない)。効くのは health コマンドのみで、`mikke index --check` の非 0 終了や index build 時の警告は変わらない(CI 併用時の混乱防止)。実行bit欠落は `exec_bit_prefixes` による opt-in、index 鮮度は情報表示のため対象外。
 - **index 鮮度**: `meta['generated']` より mtime が新しい md の件数。実行時依存なので **stdout のみ**、md レポートには含めない(レポートの差分 = 実質的状態変化、にするため)。
 - **md レポート (`--md-report`)**: 揮発情報(実行時刻・鮮度)を含めず決定的に生成 → 「内容が変わった時だけ commit」運用。改行は **LF 固定**(Windows CRLF と Linux nightly LF で差分が出て決定性が壊れるのを防ぐ)。パスはレポート置き場からの相対 md リンク(`#` は %23、空白/括弧は `<>` wrap、`[]` はエスケープ、基底名衝突回避のため wikilink でなくパスリンク)。
 

@@ -14,7 +14,10 @@
 
 #![allow(dead_code)]
 
-use crate::config::{to_posix, Config};
+use crate::config::{
+    to_posix, Config, HEALTH_CHECK_FRONTMATTER, HEALTH_CHECK_LOW_WORDS, HEALTH_CHECK_SUMMARY,
+    HEALTH_CHECK_TAGS, HEALTH_CHECK_UPDATED,
+};
 use crate::scan::{iter_notes, scan_frontmatter_issue};
 use crate::search;
 use rusqlite::{params, Connection};
@@ -103,7 +106,7 @@ pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
     let mut broken: Vec<(String, String, String)> = Vec::new();
     let mut stale_files = 0usize;
     // frontmatter を disable しても走査ループ自体は index 鮮度カウントのため残す
-    let fm_enabled = !cfg.health_disabled("frontmatter");
+    let fm_enabled = !cfg.health_disabled(HEALTH_CHECK_FRONTMATTER);
     for (md_file, rel) in iter_notes(cfg) {
         let rel_posix = to_posix(&rel);
         if skip(&rel_posix, &cfg.scan_skip_prefixes) {
@@ -159,27 +162,24 @@ pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
     }
 
     // --- index ベースの品質チェック (quality_skip_prefixes を適用、disable 指定は項目ごと空に) ---
-    let no_tags = if cfg.health_disabled("tags") {
-        vec![]
-    } else {
-        rows_filtered(
-            &conn,
-            "SELECT n.path, n.title FROM notes n
+    let quality_rows = |check: &str, sql: &str| -> Vec<(String, String)> {
+        if cfg.health_disabled(check) {
+            vec![]
+        } else {
+            rows_filtered(&conn, sql, &cfg.quality_skip_prefixes)
+        }
+    };
+    let no_tags = quality_rows(
+        HEALTH_CHECK_TAGS,
+        "SELECT n.path, n.title FROM notes n
          WHERE NOT EXISTS (SELECT 1 FROM tags t WHERE t.path = n.path)
          ORDER BY n.path",
-            &cfg.quality_skip_prefixes,
-        )
-    };
-    let no_summary = if cfg.health_disabled("summary") {
-        vec![]
-    } else {
-        rows_filtered(
-            &conn,
-            "SELECT path, title FROM notes WHERE (summary IS NULL OR summary = '') ORDER BY path",
-            &cfg.quality_skip_prefixes,
-        )
-    };
-    let low_word: Vec<(String, String, i64)> = if cfg.health_disabled("low_words") {
+    );
+    let no_summary = quality_rows(
+        HEALTH_CHECK_SUMMARY,
+        "SELECT path, title FROM notes WHERE (summary IS NULL OR summary = '') ORDER BY path",
+    );
+    let low_word: Vec<(String, String, i64)> = if cfg.health_disabled(HEALTH_CHECK_LOW_WORDS) {
         vec![]
     } else {
         let mut stmt = conn
@@ -197,15 +197,10 @@ pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
         .filter(|(p, _, _)| !skip(p, &cfg.quality_skip_prefixes))
         .collect()
     };
-    let no_updated = if cfg.health_disabled("updated") {
-        vec![]
-    } else {
-        rows_filtered(
-            &conn,
-            "SELECT path, title FROM notes WHERE (updated IS NULL OR updated = '') ORDER BY path",
-            &cfg.quality_skip_prefixes,
-        )
-    };
+    let no_updated = quality_rows(
+        HEALTH_CHECK_UPDATED,
+        "SELECT path, title FROM notes WHERE (updated IS NULL OR updated = '') ORDER BY path",
+    );
     let total: usize = {
         let mut stmt = conn
             .prepare("SELECT path FROM notes")

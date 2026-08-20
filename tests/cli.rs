@@ -588,11 +588,72 @@ fn health_disable_checks() {
         ],
     );
     run(&root, &["index"]);
-    let (stdout, stderr) = run(&root, &["health"]);
+    let out = run_raw(&root, &["health"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let _ = fs::remove_dir_all(&root);
+    assert!(
+        out.status.success(),
+        "health が非 0 で終了した:\n{stdout}\n{stderr}"
+    );
     assert!(
         stdout.contains("問題のあるノートはありません。"),
         "disable が効いていない:\n{stdout}\n{stderr}"
+    );
+}
+
+/// 単項目 disable の回帰: low_words だけを抑制し、他の品質チェックは生きている。
+#[test]
+fn health_disable_single_check() {
+    let root = temp_repo(
+        "health-disable-single",
+        &[
+            ("mikke.toml", "[health]\ndisable = [\"low_words\"]\n"),
+            // タグなし・要約なし・低ボリュームを同時に満たす短いノート
+            ("notes/short.md", "# Short\n\n短いメモ。\n"),
+        ],
+    );
+    run(&root, &["index"]);
+    let out = run_raw(&root, &["health"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        out.status.success(),
+        "health が非 0 で終了した:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("低ボリューム"),
+        "disable した low_words が報告されている:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("タグなし") && stdout.contains("要約なし"),
+        "disable していないチェックまで消えている:\n{stdout}"
+    );
+}
+
+/// --md-report でも disable 指定のチェックはレポートから消える。
+#[test]
+fn md_report_respects_disable() {
+    let root = temp_repo(
+        "health-disable-mdreport",
+        &[
+            ("mikke.toml", "[health]\ndisable = [\"low_words\"]\n"),
+            ("notes/short.md", "# Short\n\n短いメモ。\n"),
+        ],
+    );
+    run(&root, &["index"]);
+    let report = root.join("health-report.md");
+    run(&root, &["health", "--md-report", report.to_str().unwrap()]);
+    let got = fs::read_to_string(&report).unwrap();
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        !got.contains("低ボリューム"),
+        "disable した low_words がレポートに残っている:\n{got}"
+    );
+    assert!(
+        got.contains("タグなし") && got.contains("要約なし"),
+        "disable していないチェックがレポートから消えている:\n{got}"
     );
 }
 

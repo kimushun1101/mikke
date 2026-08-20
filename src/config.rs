@@ -48,7 +48,19 @@ const DEFAULT_EMBEDDINGS_DIR: &str = ".mikke/embeddings";
 const DEFAULT_MODEL: &str = "intfloat/multilingual-e5-small";
 
 /// [health] disable で指定できるチェック名 (docs/SPEC.md「health 判定」)。
-const HEALTH_CHECK_NAMES: &[&str] = &["frontmatter", "tags", "summary", "low_words", "updated"];
+/// 呼び出し側 (health.rs) もこの定数を参照し、綴りミスをコンパイル時に検知する。
+pub const HEALTH_CHECK_FRONTMATTER: &str = "frontmatter";
+pub const HEALTH_CHECK_TAGS: &str = "tags";
+pub const HEALTH_CHECK_SUMMARY: &str = "summary";
+pub const HEALTH_CHECK_LOW_WORDS: &str = "low_words";
+pub const HEALTH_CHECK_UPDATED: &str = "updated";
+const HEALTH_CHECK_NAMES: &[&str] = &[
+    HEALTH_CHECK_FRONTMATTER,
+    HEALTH_CHECK_TAGS,
+    HEALTH_CHECK_SUMMARY,
+    HEALTH_CHECK_LOW_WORDS,
+    HEALTH_CHECK_UPDATED,
+];
 
 #[derive(Debug, Clone)]
 pub struct Config {
