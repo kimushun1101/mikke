@@ -6,7 +6,9 @@
 //!   tags(path, tag, PK(path,tag))  INDEX idx_tags_tag ON tags(tag)
 //!   links(path, target, PK(path,target))
 //!   notes_fts USING fts5(path UNINDEXED, title, content, tokenize='trigram')
-//!   meta(key PK, value)   -- meta['generated'] に生成時刻 (health 鮮度判定用)
+//!   meta(key PK, value)   -- meta['generated'] に生成時刻 (health 鮮度判定 +
+//!                            auto_rebuild の stale 判定)、meta['scanned_paths_sha256'] に
+//!                            走査 path 集合のスナップショット (auto_rebuild の stale 判定)
 //!
 //! meta['generated'] は epoch 秒 (ナノ秒精度の小数文字列) で保存する。
 //! 秒精度だと mtime (小数秒) との比較で秒未満の更新を取りこぼすため
@@ -17,7 +19,9 @@
 use crate::config::{to_posix, Config};
 use crate::scan;
 use rusqlite::{params, Connection};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCHEMA: &str = "
@@ -63,6 +67,30 @@ const SCHEMA: &str = "
     );
 ";
 
+/// 走査 path 集合のスナップショットを保存する meta キー。
+const META_SCANNED_PATHS: &str = "scanned_paths_sha256";
+
+/// 走査 path 集合 (root 相対 posix) のスナップショット: ソート済リストの SHA-256。
+/// mtime が保存される移動・リネームや追加・削除を auto_rebuild の stale 判定で検知する。
+fn scanned_paths_hash(rel_paths: &[String]) -> String {
+    let mut sorted: Vec<&str> = rel_paths.iter().map(|s| s.as_str()).collect();
+    sorted.sort_unstable();
+    Sha256::digest(sorted.join("\n").as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// ファイルの mtime を epoch 秒 (f64) で返す。取得不能は 0.0 (= stale 扱いしない)。
+pub fn mtime_epoch_secs(path: &Path) -> f64 {
+    path.metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 fn emit(use_stderr: bool, line: &str) {
     if use_stderr {
         eprintln!("{line}");
@@ -88,9 +116,13 @@ pub fn build_to(cfg: &Config, use_stderr: bool) -> Vec<(String, String, String)>
     let mut note_count = 0i64;
     let mut tag_set: HashSet<String> = HashSet::new();
     let mut issues: Vec<(String, String, String)> = Vec::new();
+    // スナップショットは走査した全 path (frontmatter 破損で notes から除外される分も含む)。
+    // notes 行数と違い破損ファイルの有無で恒常 stale 化しない。
+    let mut scanned_paths: Vec<String> = Vec::new();
 
     for (md_file, rel) in scan::iter_notes(cfg) {
         let rel_posix = to_posix(&rel);
+        scanned_paths.push(rel_posix.clone());
         if let Some((kind, detail)) = scan::scan_frontmatter_issue(&md_file) {
             eprintln!("Warning: {rel_posix}: frontmatter {kind} — {detail}");
             issues.push((rel_posix.clone(), kind, detail));
@@ -148,6 +180,11 @@ pub fn build_to(cfg: &Config, use_stderr: bool) -> Vec<(String, String, String)>
         params![generated],
     )
     .expect("meta への INSERT に失敗");
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        params![META_SCANNED_PATHS, scanned_paths_hash(&scanned_paths)],
+    )
+    .expect("meta への INSERT に失敗");
 
     emit(
         use_stderr,
@@ -186,10 +223,57 @@ pub fn cmd_index(cfg: &Config, check: bool) {
     }
 }
 
+/// 既存 index が stale かを短命 Connection で判定する (auto_rebuild 用)。
+/// stale 条件: meta['generated'] / スナップショットが無い旧形式、いずれかの md の
+/// mtime > generated、走査 path 集合のハッシュがスナップショットと不一致。
+fn index_is_stale(cfg: &Config) -> bool {
+    let conn = match Connection::open(cfg.index_path()) {
+        Ok(c) => c,
+        Err(_) => return true, // 開けない index は stale 扱いで作り直す
+    };
+    let meta = |key: &str| -> Option<String> {
+        conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+            r.get::<_, String>(0)
+        })
+        .ok()
+    };
+    // meta['generated'] が無い旧形式 index は stale 扱い
+    let Some(generated) = meta("generated").and_then(|v| v.parse::<f64>().ok()) else {
+        return true;
+    };
+    let Some(saved_hash) = meta(META_SCANNED_PATHS) else {
+        return true;
+    };
+    let mut rel_paths: Vec<String> = Vec::new();
+    for (md_file, rel) in scan::iter_notes(cfg) {
+        if mtime_epoch_secs(&md_file) > generated {
+            return true;
+        }
+        rel_paths.push(to_posix(&rel));
+    }
+    scanned_paths_hash(&rel_paths) != saved_hash
+}
+
 /// index が無ければ build する (clone 直後フォールバック)。stderr に告知。
+/// 存在時の鮮度判定はしない — health はこちらを使い、auto_rebuild が
+/// 鮮度診断をマスクしないようにする (docs/SPEC.md「index スキーマ」)。
+pub fn ensure_index_exists(cfg: &Config) {
+    if !cfg.index_path().exists() {
+        eprintln!("インデックスが無いため生成しています...");
+        build_to(cfg, true);
+    }
+}
+
+/// 検索系コマンドの index 準備。無ければ build し、[index] auto_rebuild = true なら
+/// 鮮度を判定して stale なら全再構築する (告知はいずれも stderr — stdout は安定出力)。
 pub fn ensure_index(cfg: &Config) {
     if !cfg.index_path().exists() {
         eprintln!("インデックスが無いため生成しています...");
+        build_to(cfg, true);
+        return;
+    }
+    if cfg.auto_rebuild && index_is_stale(cfg) {
+        eprintln!("ソースの更新を検知したため index を再構築しています...");
         build_to(cfg, true);
     }
 }
