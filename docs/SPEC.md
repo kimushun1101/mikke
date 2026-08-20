@@ -10,14 +10,16 @@ mikke の挙動の正本。CLI 表面・設定キー・出力の意味は安定�
 |---|---|---|
 | `index` | `--check` | index 全再構築。`--check` は frontmatter 破損があれば exit 1(CI 用) |
 | `embed` | `--force` | 埋め込み差分更新(`--force` で全件)。semantic feature 必須 |
-| `find` | `<検索語...>` | 全文検索(FTS5 trigram, BM25 順。短語混在時は LIKE fallback/date 順) |
-| `tag` | `<タグ名>` | タグ部分一致検索(date 降順) |
-| `title` | `<キーワード>` | タイトル部分一致検索(date 降順) |
-| `semantic` | `<クエリ...> --top N(=5)` | 意味検索(cosine 類似度順) |
-| `hybrid` | `<クエリ...> --top N(=5)` | BM25 + semantic の RRF 融合 |
-| `list-tags` | — | タグ一覧(使用回数降順、同数は tag 名昇順) |
-| `recent` | `[件数(=10)]` | date 降順の最近ノート(date 空は除外) |
+| `find` | `<検索語...> --json` | 全文検索(FTS5 trigram, BM25 順。短語混在時は LIKE fallback/date 順) |
+| `tag` | `<タグ名> --json` | タグ部分一致検索(date 降順) |
+| `title` | `<キーワード> --json` | タイトル部分一致検索(date 降順) |
+| `semantic` | `<クエリ...> --top N(=5) --json` | 意味検索(cosine 類似度順) |
+| `hybrid` | `<クエリ...> --top N(=5) --json` | BM25 + semantic の RRF 融合 |
+| `list-tags` | `--json` | タグ一覧(使用回数降順、同数は tag 名昇順) |
+| `recent` | `[件数(=10)] --json` | date 降順の最近ノート(date 空は除外) |
 | `health` | `--md-report PATH` | 健全性チェック(決定的 md レポート出力可) |
+
+`--json` は stdout を JSON Lines に切り替える(スキーマは「出力フォーマット」参照。テキスト出力・exit code は変えない additive なフラグ)。
 
 ## exit code
 
@@ -34,6 +36,7 @@ grep の慣習に合わせる。呼び出し側は出力文言でなく exit cod
 - health は問題件数によらず 0(md レポート書き出し失敗等のエラーは 2)
 - clap の引数パースエラーは 2(`--help` / `--version` は 0)
 - hybrid の semantic ストリーム失敗は Warning を stderr に出して BM25 で継続する現行挙動のまま。degrade はエラー扱いせず、ヒット有無のみで判定する
+- `--json` は exit code を変えない(検索系の 0 件時はメタ行のみ出して 1)。JSON への変換失敗は panic(101)にせずエラーの 2(通常経路では起きない — 非有限 f64 も serde_json は null として出力する)
 - 内部エラーによる panic 終了(Rust 既定 101)は「非 0 だが値は保証外」
 
 ## 設定スキーマ (`mikke.toml`、全キー省略可)
@@ -116,6 +119,8 @@ index が無い場合は検索時に自動 build(clone 直後フォールバッ�
 
 ## 出力フォーマット
 
+### テキスト(既定)
+
 各ヒットは以下を表示:
 
 ```
@@ -126,6 +131,17 @@ index が無い場合は検索時に自動 build(clone 直後フォールバッ�
 ```
 
 score/via は semantic/hybrid のみ。**summary 欠落を空白で黙らせない**(本文未読の内容捏造を誘発するため明示)。
+
+### JSON Lines(`--json`)
+
+`find` / `tag` / `title` / `semantic` / `hybrid` / `recent` の 6 コマンドと `list-tags` は `--json` で stdout を JSON Lines(1 件 1 行、UTF-8、LF)に切り替える。jq 等の後段処理・エージェント指示書からの利用向け(テキスト出力は複数行 summary でラベル無し行が生じ、行指向パースが保証できない)。
+
+**保証**: JSON モードの stdout には JSON Lines 以外を出さない。auto-build の告知・hybrid degrade の Note・Warning 類は従来どおり stderr のため、clone 直後の初回実行でも安全にパイプできる。
+
+- **メタ行(常に 1 行目)**: `{"type":"meta","command":"<サブコマンド名>","count":N}`。テキスト見出しが持つ情報を JSON でも失わないため、find は `"order"`(`"relevance"` = BM25 順 / `"date"` = 短語 fallback の date 降順)と `"capped"`(`bm25_limit` 到達 = true。ちょうど limit 件で打ち切りが無い場合も true になる保守的判定 — テキスト出力の打ち切り表示と同一条件。true のとき count を全ヒット数と誤読しない)を必ず含み、hybrid は `"degraded"`(semantic ストリームが使えず BM25 のみになった場合に true。埋め込み未構築のほか、構築済みでも semantic 検索の実行時失敗で true になる)を必ず含む。0 件時はメタ行のみ(hit 行 0 行)
+- **hit 行(2 行目以降、1 件 1 行)**: `{"path":"...","title":"...","date":"...","tags":["a","b"],"summary":"...","score":0.0123,"via":"bm25+vec"}`。`type` フィールドは付けない。score は semantic/hybrid のみ、via は hybrid のみ(semantic は via を設定しない)。summary 空は `""` のまま(テキスト出力の sentinel 文は出さない — JSON では空文字列が欠落の明示になる)。score は f64 全精度で、テキスト出力の 4 桁丸めとは表記が異なる
+- **list-tags**: メタ行(count = タグ数)+ `{"tag":"...","count":N}` を 1 タグ 1 行
+- **スキーマ安定性**: `--json` の出力も安定インターフェース。フィールド追加は互換、既存フィールドの改名・削除・意味変更は breaking
 
 ## embedding(feature `semantic`)
 
