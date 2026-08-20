@@ -8,7 +8,7 @@ mikke の挙動の正本。CLI 表面・設定キー・出力の意味は安定�
 
 | サブコマンド | 引数 | 意味 |
 |---|---|---|
-| `index` | `--check` | index 全再構築。`--check` は frontmatter 破損があれば非 0 終了(CI 用) |
+| `index` | `--check` | index 全再構築。`--check` は frontmatter 破損があれば exit 1(CI 用) |
 | `embed` | `--force` | 埋め込み差分更新(`--force` で全件)。semantic feature 必須 |
 | `find` | `<検索語...>` | 全文検索(FTS5 trigram, BM25 順。短語混在時は LIKE fallback/date 順) |
 | `tag` | `<タグ名>` | タグ部分一致検索(date 降順) |
@@ -18,6 +18,23 @@ mikke の挙動の正本。CLI 表面・設定キー・出力の意味は安定�
 | `list-tags` | — | タグ一覧(使用回数降順、同数は tag 名昇順) |
 | `recent` | `[件数(=10)]` | date 降順の最近ノート(date 空は除外) |
 | `health` | `--md-report PATH` | 健全性チェック(決定的 md レポート出力可) |
+
+## exit code
+
+grep の慣習に合わせる。呼び出し側は出力文言でなく exit code でヒット有無・エラーを判定できる:
+
+| 状況 | exit code |
+|---|---|
+| 検索系(find / tag / title / semantic / hybrid)で 1 件以上ヒット。その他コマンドの正常終了 | 0 |
+| 検索系で 0 件 | 1 |
+| エラー(設定の型不一致・ルート未特定・index open 失敗・semantic 無効ビルド/無効 repo での semantic / embed 等) | 2 |
+
+- 一覧系(list-tags / recent)は「0 件も正常な状態報告」なので 0 のまま(recent は index 生存確認にも使う)
+- `index --check` の frontmatter 破損検出は「検出 = 結果」として 1。index 構築自体の失敗は 2。`mikke index`(`--check` 無し)は破損があっても 0
+- health は問題件数によらず 0(md レポート書き出し失敗等のエラーは 2)
+- clap の引数パースエラーは 2(`--help` / `--version` は 0)
+- hybrid の semantic ストリーム失敗は Warning を stderr に出して BM25 で継続する現行挙動のまま。degrade はエラー扱いせず、ヒット有無のみで判定する
+- 内部エラーによる panic 終了(Rust 既定 101)は「非 0 だが値は保証外」
 
 ## 設定スキーマ (`mikke.toml`、全キー省略可)
 
@@ -118,7 +135,7 @@ score/via は semantic/hybrid のみ。**summary 欠落を空白で黙らせな�
 - 差分検出はファイル内容の SHA-256。model/passage_prefix 変更時は全再構築(既存ベクトルと混ぜると比較不能)。削除ノートは metadata から除外し、**削除のみの更新でも保存し直す**(消えたベクトルが結果に残り続けるのを防ぐ)。
 - 保存: `embeddings.safetensors`(vectors 行列)+ `metadata.json`(generated, model, query_prefix, passage_prefix, note_count, notes[{path,title,hash}])。順序 = vectors 行と一致。
 - 初回はモデルを HF から cache へ DL する(オフライン/社内網の考慮を README に)。
-- semantic feature 無しビルド・バックエンド未実装の経路は silent 劣化させず、明示エラーで exit する。
+- semantic feature 無しビルド・バックエンド未実装の経路は silent 劣化させず、明示エラーで exit する(exit 2 — 「exit code」参照)。
 
 ## health 判定(決定的に)
 

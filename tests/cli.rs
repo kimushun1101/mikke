@@ -217,7 +217,7 @@ fn parent_exclude_not_leaked_into_nested() {
     );
 }
 
-/// 壊れたネスト repo 設定は silent に親規則で走査せず、path 付きで非 0 終了する。
+/// 壊れたネスト repo 設定は silent に親規則で走査せず、path 付きで exit 2 する。
 #[test]
 fn broken_nested_config_fails_loudly() {
     let root = temp_repo(
@@ -233,7 +233,11 @@ fn broken_nested_config_fails_loudly() {
     let out = run_raw(&root, &["index"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let _ = fs::remove_dir_all(&root);
-    assert!(!out.status.success(), "型エラーの子設定で成功してしまった");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "型エラーの子設定はエラー (exit 2) のはず:\n{stderr}"
+    );
     assert!(
         stderr.contains("bad") && stderr.contains("配列"),
         "エラーに子設定の path / 型メッセージが無い:\n{stderr}"
@@ -378,7 +382,7 @@ fn version_full() {
 
 // --- semantic (embed / semantic / hybrid) ---
 
-/// semantic 無効 repo での embed は明示エラーで exit 1 (feature 有効ビルド)。
+/// semantic 無効 repo での embed は明示エラーで exit 2 (feature 有効ビルド)。
 #[cfg(feature = "semantic")]
 #[test]
 fn embed_disabled_repo_errors() {
@@ -389,9 +393,10 @@ fn embed_disabled_repo_errors() {
     let out = run_raw(&root, &["embed"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let _ = fs::remove_dir_all(&root);
-    assert!(
-        !out.status.success(),
-        "semantic 無効 repo で成功してしまった"
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "semantic 無効 repo はエラー (exit 2) のはず:\n{stderr}"
     );
     assert!(
         stderr.contains("semantic が無効"),
@@ -399,7 +404,7 @@ fn embed_disabled_repo_errors() {
     );
 }
 
-/// slim ビルドの embed / semantic はビルド無効の明示エラーで exit 1 (silent 劣化させない)。
+/// slim ビルドの embed / semantic はビルド無効の明示エラーで exit 2 (silent 劣化させない)。
 #[cfg(not(feature = "semantic"))]
 #[test]
 fn embed_slim_build_errors() {
@@ -415,17 +420,19 @@ fn embed_slim_build_errors() {
     let embed_err = String::from_utf8_lossy(&embed_out.stderr).into_owned();
     let semantic_err = String::from_utf8_lossy(&semantic_out.stderr).into_owned();
     let _ = fs::remove_dir_all(&root);
-    assert!(
-        !embed_out.status.success(),
-        "slim ビルドの embed が成功してしまった"
+    assert_eq!(
+        embed_out.status.code(),
+        Some(2),
+        "slim ビルドの embed はエラー (exit 2) のはず:\n{embed_err}"
     );
     assert!(
         embed_err.contains("このビルドは semantic 無効です"),
         "embed のビルド無効メッセージが無い:\n{embed_err}"
     );
-    assert!(
-        !semantic_out.status.success(),
-        "slim ビルドの semantic が成功してしまった"
+    assert_eq!(
+        semantic_out.status.code(),
+        Some(2),
+        "slim ビルドの semantic はエラー (exit 2) のはず:\n{semantic_err}"
     );
     assert!(
         semantic_err.contains("このビルドで無効です"),
@@ -568,6 +575,95 @@ fn semantic_e2e() {
     );
 
     let _ = fs::remove_dir_all(&root);
+}
+
+// --- exit code (grep 慣習: ヒット=0 / 0件=1 / エラー=2 — docs/SPEC.md「exit code」) ---
+
+/// 検索系はヒットで 0、0 件で 1。一覧系 (list-tags / recent) は 0 件も正常で 0。
+#[test]
+fn search_exit_codes() {
+    let root = temp_repo(
+        "exitcode",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            (
+                "notes/a.md",
+                "---\ntitle: Hit ノート\ntags: [walrus]\n---\n\nquokka のメモ。\n",
+            ),
+        ],
+    );
+    for (args, expected, label) in [
+        (&["find", "quokka"][..], 0, "find ヒット"),
+        (&["find", "pangolin"][..], 1, "find 0 件"),
+        (&["tag", "walrus"][..], 0, "tag ヒット"),
+        // tag は 0 件専用文言の early-return 経路
+        (&["tag", "pangolin"][..], 1, "tag 0 件"),
+        (&["title", "Hit"][..], 0, "title ヒット"),
+        (&["title", "pangolin"][..], 1, "title 0 件"),
+        (&["hybrid", "quokka"][..], 0, "hybrid ヒット"),
+        (&["hybrid", "pangolin"][..], 1, "hybrid 0 件"),
+        (&["list-tags"][..], 0, "list-tags"),
+        // date 付きノートが無く 0 件だが、状態報告として 0 (index 生存確認に使う)
+        (&["recent", "5"][..], 0, "recent 0 件"),
+    ] {
+        let out = run_raw(&root, args);
+        assert_eq!(
+            out.status.code(),
+            Some(expected),
+            "{label} の exit code が {expected} でない:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// index --check の frontmatter 破損検出は「検出 = 結果」の exit 1、--check 無しは 0。
+#[test]
+fn index_check_exit_codes() {
+    let root = temp_repo(
+        "exitcode-chk",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            // 閉じ --- 欠落の frontmatter 破損
+            ("bad.md", "---\ntitle: Bad\n\n本文。\n"),
+        ],
+    );
+    let out = run_raw(&root, &["index", "--check"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "--check の破損検出は exit 1 のはず:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = run_raw(&root, &["index"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "--check 無しは破損があっても exit 0 のはず:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// 設定の型エラーは検索系でもエラーとして exit 2 (0 件の 1 と区別する)。
+#[test]
+fn config_error_exit_code() {
+    let root = temp_repo(
+        "exitcode-cfg",
+        &[
+            // include を文字列で書く型エラー (配列必須)
+            ("mikke.toml", "[scan]\ninclude = \"notes\"\n"),
+            ("notes/a.md", "# A\n\nquokka のメモ。\n"),
+        ],
+    );
+    let out = run_raw(&root, &["find", "quokka"]);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "壊れ設定はエラー (exit 2) のはず:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// health --md-report の生成ファイルを golden と比較 (決定的・可搬リンク)。

@@ -299,7 +299,7 @@ fn iso8601_utc(epoch_secs: u64) -> String {
 
 fn exit_err(msg: &str) -> ! {
     eprintln!("Error: {msg}");
-    std::process::exit(1);
+    std::process::exit(2);
 }
 
 // --- コマンド本体 ---
@@ -307,7 +307,7 @@ fn exit_err(msg: &str) -> ! {
 pub fn cmd_embed(cfg: &Config, force: bool) {
     if !cfg.semantic_enabled {
         eprintln!("Error: この root では semantic が無効です (mikke.toml の [semantic] enabled = true で有効化)。");
-        std::process::exit(1);
+        std::process::exit(2);
     }
     build_embeddings(cfg, force);
 }
