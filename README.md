@@ -67,6 +67,8 @@ mikke semantic クエリ      # 意味検索
 mikke hybrid クエリ        # BM25 + semantic の RRF 融合
 ```
 
+検索系コマンド (find / tag / title / semantic / hybrid / recent) と `list-tags` は `--json` で JSON Lines (1 行目メタ行 + 1 件 1 行) を stdout に出力する。jq やスクリプトから安全にパースでき、exit code は変わらない。スキーマは [docs/SPEC.md](docs/SPEC.md) の「出力フォーマット」。
+
 ルートは `--root PATH` 明示指定 → 環境変数 `MIKKE_ROOT` → cwd からの `mikke.toml` (設定を隠したい場合は `.mikke.toml`) 上方探索 → git root の順で決める。git 管理でないフォルダも、`mikke.toml` を置くか `--root` を指定すればそのまま対象にできる。
 
 ### 設定 (mikke.toml)

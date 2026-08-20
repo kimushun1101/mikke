@@ -1,0 +1,2 @@
+{"type":"meta","command":"title","count":1}
+{"path":"notes/robotics-control.md","title":"ロボット制御メモ","date":"2026-05-10","tags":["control","robotics"],"summary":"PID とモデル予測制御の比較。"}

@@ -666,6 +666,93 @@ fn config_error_exit_code() {
     );
 }
 
+// --- --json (JSON Lines — docs/SPEC.md「出力フォーマット」) ---
+
+/// --json は stdout の全行が JSON としてパース可能で、1 行目はコマンド名入りのメタ行。
+#[test]
+fn json_all_lines_parse() {
+    let root = temp_copy("json");
+    let (_o, _e) = run(&root, &["index"]);
+    for (args, command) in [
+        (&["find", "slam", "--json"][..], "find"),
+        (&["tag", "robotics", "--json"][..], "tag"),
+        (&["title", "メモ", "--json"][..], "title"),
+        (&["hybrid", "ロボット", "制御", "--json"][..], "hybrid"),
+        (&["list-tags", "--json"][..], "list-tags"),
+        (&["recent", "5", "--json"][..], "recent"),
+    ] {
+        let (stdout, stderr) = run(&root, args);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert!(!lines.is_empty(), "{command}: 出力が空:\n{stderr}");
+        for line in &lines {
+            serde_json::from_str::<serde_json::Value>(line).unwrap_or_else(|e| {
+                panic!("{command}: JSON でない行 ({e}):\n{line}\nstderr:\n{stderr}")
+            });
+        }
+        let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(meta["type"], "meta", "{command}: 1 行目がメタ行でない");
+        assert_eq!(
+            meta["command"], command,
+            "{command}: メタ行の command 不一致"
+        );
+        assert_eq!(
+            meta["count"].as_u64().unwrap() as usize,
+            lines.len() - 1,
+            "{command}: メタ行の count と hit 行数の不一致:\n{stdout}"
+        );
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// --json の 0 件時はメタ行 (count: 0) のみで、exit code は現行どおり 1。
+#[test]
+fn json_zero_hits_meta_only() {
+    let root = temp_copy("json0");
+    let (_o, _e) = run(&root, &["index"]);
+    let out = run_raw(&root, &["find", "pangolin", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "--json でも 0 件は exit 1 のはず"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "0 件時はメタ行のみのはず:\n{stdout}");
+    let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(meta["type"], "meta");
+    assert_eq!(meta["count"], 0);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// 複数行 summary もエスケープされて 1 件 1 行が保たれる (行指向パースが壊れない —
+/// テキスト出力ではラベル無しの生テキスト行になる既知の弱点への対策)。
+#[test]
+fn json_multiline_summary_stays_single_line() {
+    let root = temp_repo(
+        "json-ml",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            (
+                "notes/a.md",
+                "---\ntitle: 改行 summary\nsummary: |\n  1 行目\n  2 行目\ntags: [quokka]\n---\n\nquokka のメモ。\n",
+            ),
+        ],
+    );
+    let (stdout, stderr) = run(&root, &["find", "quokka", "--json"]);
+    let _ = fs::remove_dir_all(&root);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "メタ行 + hit 1 行のはず:\n{stdout}\n{stderr}"
+    );
+    let hit: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert!(
+        hit["summary"].as_str().unwrap().contains('\n'),
+        "summary の改行が保持されていない:\n{stdout}"
+    );
+}
+
 /// health --md-report の生成ファイルを golden と比較 (決定的・可搬リンク)。
 #[test]
 fn golden_md_report() {

@@ -51,16 +51,25 @@ enum Command {
     Find {
         #[arg(required = true, value_name = "検索語")]
         words: Vec<String>,
+        /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
+        #[arg(long)]
+        json: bool,
     },
     /// タグ検索 (部分一致, date 降順)
     Tag {
         #[arg(value_name = "タグ名")]
         keyword: String,
+        /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
+        #[arg(long)]
+        json: bool,
     },
     /// タイトル検索 (部分一致, date 降順)
     Title {
         #[arg(value_name = "キーワード")]
         keyword: String,
+        /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
+        #[arg(long)]
+        json: bool,
     },
     /// セマンティック検索
     Semantic {
@@ -68,6 +77,9 @@ enum Command {
         query: Vec<String>,
         #[arg(long, default_value_t = 5, value_name = "N")]
         top: usize,
+        /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
+        #[arg(long)]
+        json: bool,
     },
     /// ハイブリッド検索 (BM25 + semantic の RRF 融合)。埋め込み未構築なら BM25 のみへ degrade
     Hybrid {
@@ -75,14 +87,24 @@ enum Command {
         query: Vec<String>,
         #[arg(long, default_value_t = 5, value_name = "N")]
         top: usize,
+        /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
+        #[arg(long)]
+        json: bool,
     },
     /// タグ一覧 (使用回数順)
     #[command(name = "list-tags")]
-    ListTags,
+    ListTags {
+        /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
+        #[arg(long)]
+        json: bool,
+    },
     /// 最近のノート
     Recent {
         #[arg(default_value_t = 10, value_name = "件数")]
         count: usize,
+        /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
+        #[arg(long)]
+        json: bool,
     },
     /// ノート repo の健全性チェック
     Health {
@@ -104,19 +126,23 @@ fn main() {
             index::cmd_index(&cfg, check);
             None
         }
-        Command::Find { words } => Some(search::cmd_find(&cfg, &words)),
-        Command::Tag { keyword } => Some(search::cmd_tag(&cfg, &keyword)),
-        Command::Title { keyword } => Some(search::cmd_title(&cfg, &keyword)),
-        Command::ListTags => {
-            search::cmd_list_tags(&cfg);
+        Command::Find { words, json } => Some(search::cmd_find(&cfg, &words, json)),
+        Command::Tag { keyword, json } => Some(search::cmd_tag(&cfg, &keyword, json)),
+        Command::Title { keyword, json } => Some(search::cmd_title(&cfg, &keyword, json)),
+        Command::ListTags { json } => {
+            search::cmd_list_tags(&cfg, json);
             None
         }
-        Command::Recent { count } => {
-            search::cmd_recent(&cfg, count);
+        Command::Recent { count, json } => {
+            search::cmd_recent(&cfg, count, json);
             None
         }
-        Command::Semantic { query, top } => Some(search::cmd_semantic(&cfg, &query.join(" "), top)),
-        Command::Hybrid { query, top } => Some(search::cmd_hybrid(&cfg, &query.join(" "), top)),
+        Command::Semantic { query, top, json } => {
+            Some(search::cmd_semantic(&cfg, &query.join(" "), top, json))
+        }
+        Command::Hybrid { query, top, json } => {
+            Some(search::cmd_hybrid(&cfg, &query.join(" "), top, json))
+        }
         Command::Health { md_report } => {
             health::cmd_health(&cfg, md_report.as_deref());
             None

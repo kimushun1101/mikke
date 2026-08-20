@@ -1,0 +1,2 @@
+{"type":"meta","command":"find","count":1,"order":"date","capped":false}
+{"path":"notes/short.md","title":"短い","date":"2026-06-01","tags":["misc"],"summary":""}
