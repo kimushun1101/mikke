@@ -440,6 +440,34 @@ fn embed_slim_build_errors() {
     );
 }
 
+/// slim ビルドの semantic --json もビルド無効の明示エラー (stderr + exit 2) のままで、
+/// stdout に部分的な JSON (メタ行等) を出さない (JSON モードの stdout 純度をエラー経路でも保つ)。
+#[cfg(not(feature = "semantic"))]
+#[test]
+fn semantic_slim_json_errors_without_stdout() {
+    let root = temp_repo(
+        "sem-slim-json",
+        &[("mikke.toml", "[scan]\n"), ("a.md", "# A\n\nメモ。\n")],
+    );
+    let out = run_raw(&root, &["semantic", "クエリ", "--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "slim ビルドの semantic --json はエラー (exit 2) のはず:\n{stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "エラー時の stdout に部分的な JSON が出ている:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("このビルドで無効です"),
+        "ビルド無効メッセージが stderr に無い:\n{stderr}"
+    );
+}
+
 /// embed → semantic → hybrid → 差分更新 → 削除 → prefix 変更 の一連 e2e。
 /// モデル取得が必要 (HF cache かネットワーク) なため既定では走らせない:
 ///   cargo test --features semantic -- --ignored
@@ -705,23 +733,70 @@ fn json_all_lines_parse() {
 }
 
 /// --json の 0 件時はメタ行 (count: 0) のみで、exit code は現行どおり 1。
+/// tag は 0 件専用文言の early-return 経路、title は共通経路 — 各コマンドで対称に固定する。
 #[test]
 fn json_zero_hits_meta_only() {
     let root = temp_copy("json0");
     let (_o, _e) = run(&root, &["index"]);
-    let out = run_raw(&root, &["find", "pangolin", "--json"]);
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "--json でも 0 件は exit 1 のはず"
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 1, "0 件時はメタ行のみのはず:\n{stdout}");
-    let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(meta["type"], "meta");
-    assert_eq!(meta["count"], 0);
+    for (args, command) in [
+        (&["find", "pangolin", "--json"][..], "find"),
+        (&["tag", "pangolin", "--json"][..], "tag"),
+        (&["title", "pangolin", "--json"][..], "title"),
+    ] {
+        let out = run_raw(&root, args);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{command}: --json でも 0 件は exit 1 のはず"
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "{command}: 0 件時はメタ行のみのはず:\n{stdout}"
+        );
+        let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(meta["type"], "meta", "{command}: 1 行目がメタ行でない");
+        assert_eq!(
+            meta["command"], command,
+            "{command}: メタ行の command 不一致"
+        );
+        assert_eq!(meta["count"], 0, "{command}: count が 0 でない");
+    }
     let _ = fs::remove_dir_all(&root);
+}
+
+/// index 未作成 repo での --json 初回実行 (auto-build 発動) でも stdout は JSON Lines のみで、
+/// auto-build の告知は stderr に出る (SPEC「保証」: clone 直後の初回実行でも安全にパイプできる)。
+#[test]
+fn json_auto_build_stdout_stays_pure() {
+    let root = temp_repo(
+        "json-autobuild",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            (
+                "notes/a.md",
+                "---\ntitle: Auto ノート\ntags: [quokka]\n---\n\nquokka のメモ。\n",
+            ),
+        ],
+    );
+    // index は事前に作らない — find --json 自体が auto-build を発動する
+    let (stdout, stderr) = run(&root, &["find", "quokka", "--json"]);
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        stderr.contains("インデックスが無いため生成しています"),
+        "auto-build 告知が stderr に無い (前提崩れ):\n{stderr}"
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(!lines.is_empty(), "出力が空:\n{stderr}");
+    for line in &lines {
+        serde_json::from_str::<serde_json::Value>(line).unwrap_or_else(|e| {
+            panic!("auto-build 時に stdout へ JSON でない行が混入 ({e}):\n{line}\nstdout 全体:\n{stdout}")
+        });
+    }
+    let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(meta["command"], "find", "1 行目がメタ行でない:\n{stdout}");
 }
 
 /// 複数行 summary もエスケープされて 1 件 1 行が保たれる (行指向パースが壊れない —
