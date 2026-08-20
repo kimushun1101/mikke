@@ -45,9 +45,7 @@ frontmatter 破損・タグ/要約欠落・低ボリュームといったノー�
 
 1. ノートフォルダのルートに `mikke.toml` を置く (全キー省略可。走査除外や health 閾値を必要になったら足す。設定ファイルを見せたくない場合は `.mikke.toml` でも可)
 2. `.gitignore` に `.mikke/` を追加
-3. エージェント指示書 (`CLAUDE.md` / `AGENTS.md`) に検索手順を書く。例:
-
-   > 過去の知見・記録の検索は `mikke find <語...>` / `mikke hybrid <クエリ>` を使う。index (`.mikke/`) は binary なので直接読まない。
+3. エージェント指示書 (`CLAUDE.md` / `AGENTS.md`) に検索手順を書く。[examples/agents/mikke.md](../examples/agents/mikke.md) のスニペットをそのまま貼れる
 
 ### 日常の検索 (人間・エージェント共通)
 
