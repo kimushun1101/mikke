@@ -316,7 +316,7 @@ pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
         // newline は LF 固定 (CRLF が混ざると「内容が変わった時だけ commit」の決定性が壊れる)
         if let Err(e) = std::fs::write(report_path, lines.join("\n") + "\n") {
             eprintln!("Error: レポートを書き出せません: {e}");
-            std::process::exit(1);
+            std::process::exit(2);
         }
         eprintln!("レポート書き出し: {}", report_path.display());
     }

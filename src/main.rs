@@ -97,27 +97,45 @@ fn main() {
     let root = config::resolve_root(cli.root.as_deref());
     let cfg = config::load_config(root);
 
-    match cli.command {
-        Command::Index { check } => index::cmd_index(&cfg, check),
-        Command::Find { words } => search::cmd_find(&cfg, &words),
-        Command::Tag { keyword } => search::cmd_tag(&cfg, &keyword),
-        Command::Title { keyword } => search::cmd_title(&cfg, &keyword),
-        Command::ListTags => search::cmd_list_tags(&cfg),
-        Command::Recent { count } => search::cmd_recent(&cfg, count),
-        Command::Semantic { query, top } => search::cmd_semantic(&cfg, &query.join(" "), top),
-        Command::Hybrid { query, top } => search::cmd_hybrid(&cfg, &query.join(" "), top),
-        Command::Health { md_report } => health::cmd_health(&cfg, md_report.as_deref()),
+    // 検索系 (find/tag/title/semantic/hybrid) はヒット件数を返し、0 件なら grep 慣習で
+    // exit 1 にする (docs/SPEC.md「exit code」)。一覧系等は 0 件も正常な状態報告なので None。
+    let hits: Option<usize> = match cli.command {
+        Command::Index { check } => {
+            index::cmd_index(&cfg, check);
+            None
+        }
+        Command::Find { words } => Some(search::cmd_find(&cfg, &words)),
+        Command::Tag { keyword } => Some(search::cmd_tag(&cfg, &keyword)),
+        Command::Title { keyword } => Some(search::cmd_title(&cfg, &keyword)),
+        Command::ListTags => {
+            search::cmd_list_tags(&cfg);
+            None
+        }
+        Command::Recent { count } => {
+            search::cmd_recent(&cfg, count);
+            None
+        }
+        Command::Semantic { query, top } => Some(search::cmd_semantic(&cfg, &query.join(" "), top)),
+        Command::Hybrid { query, top } => Some(search::cmd_hybrid(&cfg, &query.join(" "), top)),
+        Command::Health { md_report } => {
+            health::cmd_health(&cfg, md_report.as_deref());
+            None
+        }
         Command::Embed { force } => {
             #[cfg(feature = "semantic")]
             {
                 embed::cmd_embed(&cfg, force);
+                None
             }
             #[cfg(not(feature = "semantic"))]
             {
                 let _ = force;
                 eprintln!("Error: このビルドは semantic 無効です (cargo build --features semantic で有効化)。");
-                std::process::exit(1);
+                std::process::exit(2)
             }
         }
+    };
+    if hits == Some(0) {
+        std::process::exit(1);
     }
 }

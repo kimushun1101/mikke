@@ -33,7 +33,7 @@ pub fn connect(cfg: &Config) -> Connection {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: index を開けません: {e}");
-            std::process::exit(1);
+            std::process::exit(2);
         }
     }
 }
@@ -143,7 +143,7 @@ fn query_paths(conn: &Connection, sql: &str, param: &str) -> Vec<String> {
     rows.flatten().collect()
 }
 
-pub fn cmd_tag(cfg: &Config, keyword: &str) {
+pub fn cmd_tag(cfg: &Config, keyword: &str) -> usize {
     let conn = connect(cfg);
     let paths = query_paths(
         &conn,
@@ -155,14 +155,15 @@ pub fn cmd_tag(cfg: &Config, keyword: &str) {
     );
     if paths.is_empty() {
         println!("タグ '{keyword}' に一致するノートが見つかりませんでした。");
-        return;
+        return 0;
     }
     let notes = fetch_notes(&conn, &paths);
     println!("タグ '{keyword}' の検索結果 ({}件):\n", notes.len());
     print_notes(&notes);
+    notes.len()
 }
 
-pub fn cmd_title(cfg: &Config, keyword: &str) {
+pub fn cmd_title(cfg: &Config, keyword: &str) -> usize {
     let conn = connect(cfg);
     let paths = query_paths(
         &conn,
@@ -172,6 +173,7 @@ pub fn cmd_title(cfg: &Config, keyword: &str) {
     let notes = fetch_notes(&conn, &paths);
     println!("タイトル '{keyword}' の検索結果 ({}件):\n", notes.len());
     print_notes(&notes);
+    notes.len()
 }
 
 /// keyword を空白で語分割 (空白のみなら keyword 全体を 1 語扱い)。
@@ -237,7 +239,7 @@ fn bm25_ranked_paths(conn: &Connection, keyword: &str, limit: i64) -> Vec<String
     }
 }
 
-pub fn cmd_find(cfg: &Config, words: &[String]) {
+pub fn cmd_find(cfg: &Config, words: &[String]) -> usize {
     // find はフラグを持たないため全語を結合 (無クォートの複数語でも語落ちしない)。
     let keyword = words.join(" ");
     let conn = connect(cfg);
@@ -261,6 +263,7 @@ pub fn cmd_find(cfg: &Config, words: &[String]) {
         notes.len()
     );
     print_notes(&notes);
+    notes.len()
 }
 
 pub fn cmd_list_tags(cfg: &Config) {
@@ -299,7 +302,7 @@ fn embeddings_available(cfg: &Config) -> bool {
         && cfg.embeddings_dir().join("metadata.json").exists()
 }
 
-pub fn cmd_semantic(cfg: &Config, query: &str, top: usize) {
+pub fn cmd_semantic(cfg: &Config, query: &str, top: usize) -> usize {
     #[cfg(feature = "semantic")]
     {
         let ranked = match crate::embed::semantic_ranked(cfg, query, top) {
@@ -307,7 +310,7 @@ pub fn cmd_semantic(cfg: &Config, query: &str, top: usize) {
             Err(e) => {
                 eprintln!("Error: {e}。");
                 eprintln!("  mikke embed を実行してください (semantic feature が必要)。");
-                std::process::exit(1);
+                std::process::exit(2);
             }
         };
         let conn = connect(cfg);
@@ -319,6 +322,7 @@ pub fn cmd_semantic(cfg: &Config, query: &str, top: usize) {
         }
         println!("セマンティック検索 '{query}' の結果 (上位{top}件):\n");
         print_notes(&notes);
+        notes.len()
     }
     #[cfg(not(feature = "semantic"))]
     {
@@ -326,7 +330,7 @@ pub fn cmd_semantic(cfg: &Config, query: &str, top: usize) {
         // feature 無効ビルドでは silent に劣化させず明示エラーで exit する。
         eprintln!("Error: semantic 検索はこのビルドで無効です (cargo build --features semantic で有効化)。");
         eprintln!("  semantic 付きビルドを使うか、find/hybrid を使ってください。");
-        std::process::exit(1);
+        std::process::exit(2);
     }
 }
 
@@ -357,7 +361,7 @@ fn semantic_stream(cfg: &Config, query: &str, depth: usize) -> Option<Vec<String
 }
 
 /// BM25 (キーワード) と semantic (意味) を RRF 融合するハイブリッド検索。
-pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize) {
+pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize) -> usize {
     let candidate_depth = top as i64 * cfg.candidate_factor; // 各ストリームから多めに取って融合する
     let conn = connect(cfg);
 
@@ -439,4 +443,5 @@ pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize) {
     };
     println!("ハイブリッド検索 '{query}' の結果 (上位{top}件, {mode}):\n");
     print_notes(&notes);
+    notes.len()
 }
