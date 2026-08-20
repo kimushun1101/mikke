@@ -1,4 +1,4 @@
-//! 検索コマンド群 (find / tag / title / semantic / hybrid / list-tags / recent)。
+//! 検索コマンド群 (find / tag / title / semantic / hybrid / list-tags / recent / links / backlinks)。
 //!
 //! FTS 変換 (fts_query): 空白で語分割 → 各語を個別に `"..."` quote (内部 " は "") → AND 連結。
 //! trigram 制約: 各語 3 文字以上なら `ORDER BY rank` (FTS5 BM25)。1 語でも <3 文字を含めば
@@ -8,6 +8,8 @@
 //! list-tags: GROUP BY tag ORDER BY COUNT(*) DESC, tag。
 //! hybrid RRF: 各ストリーム top_n*candidate_factor → rank 1 始まり → score += w * 1/(rrf_k+rank)。
 //!   semantic 未構築なら vec 重み 0 で再正規化し BM25 のみへ degrade。via に bm25/vec/bm25+vec。
+//! links/backlinks: links テーブル (wikilink の生 target) を読むリンクグラフ。target →
+//!   ノートの解決規則・件数・出力は docs/SPEC.md「リンクグラフ」(テキスト出力のみ)。
 //! --json: stdout を JSON Lines (1 行目メタ行 + 1 件 1 行) に切り替える。スキーマは docs/SPEC.md。
 
 #![allow(dead_code)]
@@ -388,6 +390,147 @@ pub fn cmd_recent(cfg: &Config, count: usize, json: bool) {
         println!("最近のノート (上位{count}件):\n");
     }
     print_notes(&notes, json);
+}
+
+/// notes.path の全件 (path 昇順)。links テーブルは小さく、target の解決は全走査で足りる。
+fn all_note_paths(conn: &Connection) -> Vec<String> {
+    let mut stmt = conn
+        .prepare("SELECT path FROM notes ORDER BY path")
+        .expect("notes SELECT の準備に失敗");
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .expect("notes SELECT に失敗");
+    rows.flatten().collect()
+}
+
+/// wikilink target からノート部を取り出す (`#fragment` は照合前に除去)。
+/// ノート部が空 (`[[#anchor]]`) は自ノート内アンカーで対象外 → None。
+fn target_note_part(target: &str) -> Option<&str> {
+    let note = target.split('#').next().unwrap_or(target);
+    if note.is_empty() {
+        None
+    } else {
+        Some(note)
+    }
+}
+
+/// target 表現 (fragment 除去済) が path のノートを指しうるか。
+/// 規則: path から `.md` を除いた文字列に対する、パス成分単位の末尾一致
+/// (`[[note-name]]` の stem 完全一致は 1 成分の末尾一致として包含)。大文字小文字は区別する。
+fn target_matches(path: &str, target: &str) -> bool {
+    let path_no_md = path.strip_suffix(".md").unwrap_or(path);
+    path_no_md == target || path_no_md.ends_with(&format!("/{target}"))
+}
+
+/// links / backlinks の `<note>` 引数を root 相対 path へ解決する。
+/// 完全一致 → 引数の `.md` を除いた文字列で target と同じ成分末尾一致のフォールバック。
+/// 該当なし・複数一致は「結果 0 件」と区別して入力エラーの exit 2
+/// (複数一致は silent に 1 件を選ばず、候補 path を stderr へ列挙する)。
+fn resolve_note_arg(conn: &Connection, arg: &str) -> String {
+    let paths = all_note_paths(conn);
+    if paths.iter().any(|p| p == arg) {
+        return arg.to_string();
+    }
+    let q = arg.strip_suffix(".md").unwrap_or(arg);
+    let matches: Vec<&String> = paths.iter().filter(|p| target_matches(p, q)).collect();
+    match matches.len() {
+        0 => {
+            eprintln!("Error: ノート '{arg}' が見つかりません (root 相対 path か stem で指定)。");
+            std::process::exit(2);
+        }
+        1 => matches[0].clone(),
+        _ => {
+            eprintln!("Error: ノート '{arg}' が複数に一致します。path で一意に指定してください:");
+            for p in matches {
+                eprintln!("  {p}");
+            }
+            std::process::exit(2);
+        }
+    }
+}
+
+/// 発リンク一覧: 対象ノートの wikilink target を列挙し、ノートへ解決して表示する。
+/// 返り値は結果件数 (= 対象 target 数。未解決の列挙も結果に数える。0 件は main 側で exit 1)。
+pub fn cmd_links(cfg: &Config, note: &str) -> usize {
+    let conn = connect(cfg);
+    let path = resolve_note_arg(&conn, note);
+    let targets = query_paths(
+        &conn,
+        "SELECT target FROM links WHERE path = ?1 ORDER BY target",
+        &path,
+    );
+    let all_paths = all_note_paths(&conn);
+
+    let mut resolved_paths: Vec<String> = Vec::new();
+    let mut unresolved: Vec<&String> = Vec::new();
+    let mut counted = 0usize;
+    let mut resolved_count = 0usize;
+    for target in &targets {
+        let Some(note_part) = target_note_part(target) else {
+            continue; // `[[#anchor]]` は自ノート内アンカーで対象外
+        };
+        counted += 1;
+        let hits: Vec<&String> = all_paths
+            .iter()
+            .filter(|p| target_matches(p, note_part))
+            .collect();
+        if hits.is_empty() {
+            unresolved.push(target);
+        } else {
+            resolved_count += 1;
+            // 複数一致は全件表示 (曖昧さを隠さない)。同一ノートへの重複 target は 1 回だけ
+            for h in hits {
+                if !resolved_paths.contains(h) {
+                    resolved_paths.push(h.clone());
+                }
+            }
+        }
+    }
+
+    println!(
+        "'{path}' の発リンク (target {counted}件, 解決 {resolved_count}件 / 未解決 {}件):\n",
+        unresolved.len()
+    );
+    if counted == 0 {
+        println!("wikilink がありません。");
+        return 0;
+    }
+    let notes = fetch_notes(&conn, &resolved_paths);
+    if !notes.is_empty() {
+        print_notes(&notes, false);
+    }
+    // 解決できない target は黙って落とさず明示列挙 (未解決 = 壊れたリンクとは限らない — docs/SPEC.md)
+    for target in unresolved {
+        println!("  (未解決) [[{target}]]");
+    }
+    counted
+}
+
+/// 被リンク一覧: 対象ノートを指しうる target を持つノートを表示する。返り値は結果件数。
+pub fn cmd_backlinks(cfg: &Config, note: &str) -> usize {
+    let conn = connect(cfg);
+    let path = resolve_note_arg(&conn, note);
+    let mut stmt = conn
+        .prepare("SELECT path, target FROM links ORDER BY path, target")
+        .expect("links SELECT の準備に失敗");
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .expect("links SELECT に失敗");
+    let mut sources: Vec<String> = Vec::new();
+    for (src, target) in rows.flatten() {
+        let Some(note_part) = target_note_part(&target) else {
+            continue;
+        };
+        if target_matches(&path, note_part) && !sources.contains(&src) {
+            sources.push(src);
+        }
+    }
+    let mut notes = fetch_notes(&conn, &sources);
+    // tag/title と同じ date 降順 (date 空は末尾)、同 date は path 昇順で決定的に
+    notes.sort_by(|a, b| b.date.cmp(&a.date).then(a.path.cmp(&b.path)));
+    println!("'{path}' の被リンク ({}件):\n", notes.len());
+    print_notes(&notes, false);
+    notes.len()
 }
 
 fn embeddings_available(cfg: &Config) -> bool {

@@ -590,6 +590,10 @@ fn search_exit_codes() {
                 "notes/a.md",
                 "---\ntitle: Hit ノート\ntags: [walrus]\n---\n\nquokka のメモ。\n",
             ),
+            (
+                "notes/b.md",
+                "---\ntitle: Link 元ノート\n---\n\n[[a]] と未解決の [[gone]] へのリンク。\n",
+            ),
         ],
     );
     for (args, expected, label) in [
@@ -602,6 +606,11 @@ fn search_exit_codes() {
         (&["title", "pangolin"][..], 1, "title 0 件"),
         (&["hybrid", "quokka"][..], 0, "hybrid ヒット"),
         (&["hybrid", "pangolin"][..], 1, "hybrid 0 件"),
+        // links は未解決 target も結果に数える (壊れたリンクとは限らない — docs/SPEC.md)
+        (&["links", "notes/b.md"][..], 0, "links ヒット"),
+        (&["links", "notes/a.md"][..], 1, "links 0 件"),
+        (&["backlinks", "notes/a.md"][..], 0, "backlinks ヒット"),
+        (&["backlinks", "notes/b.md"][..], 1, "backlinks 0 件"),
         (&["list-tags"][..], 0, "list-tags"),
         // date 付きノートが無く 0 件だが、状態報告として 0 (index 生存確認に使う)
         (&["recent", "5"][..], 0, "recent 0 件"),
@@ -663,6 +672,83 @@ fn config_error_exit_code() {
         Some(2),
         "壊れ設定はエラー (exit 2) のはず:\n{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// --- links / backlinks (リンクグラフ — docs/SPEC.md「リンクグラフ」) ---
+
+/// `<note>` 引数の複数一致は silent に 1 件を選ばず、候補を stderr へ列挙して exit 2。
+#[test]
+fn links_ambiguous_note_arg_errors() {
+    let root = temp_repo(
+        "links-ambig-arg",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            ("x/dup.md", "# X\n\n重複名ノートその 1。\n"),
+            ("y/dup.md", "# Y\n\n重複名ノートその 2。\n"),
+        ],
+    );
+    let out = run_raw(&root, &["links", "dup"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "複数一致は入力エラー (exit 2) のはず:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("x/dup.md") && stderr.contains("y/dup.md"),
+        "候補の path が stderr に列挙されていない:\n{stderr}"
+    );
+}
+
+/// `<note>` が見つからない場合も入力エラーとして exit 2 (結果 0 件の 1 と区別)。
+#[test]
+fn links_unknown_note_errors() {
+    let root = temp_repo(
+        "links-unknown",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            ("notes/a.md", "# A\n\n通常ノート。\n"),
+        ],
+    );
+    let out = run_raw(&root, &["links", "nosuch"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "未知ノートは入力エラー (exit 2) のはず:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("見つかりません"),
+        "未発見メッセージが無い:\n{stderr}"
+    );
+}
+
+/// 複数ノートに一致する target は全件表示する (曖昧さを隠さない)。backlinks 側も
+/// 「指しうる」で判定するため、同名ノートのどちらからも被リンクに挙がる。
+#[test]
+fn links_ambiguous_target_lists_all() {
+    let root = temp_repo(
+        "links-ambig-target",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            ("hub.md", "# ハブ\n\n同名ノートへの [[dup]] を張る。\n"),
+            ("x/dup.md", "# X\n\n重複名ノートその 1。\n"),
+            ("y/dup.md", "# Y\n\n重複名ノートその 2。\n"),
+        ],
+    );
+    let (stdout, stderr) = run(&root, &["links", "hub.md"]);
+    assert!(
+        stdout.contains("x/dup.md") && stdout.contains("y/dup.md"),
+        "複数一致 target の全件表示になっていない:\n{stdout}\n{stderr}"
+    );
+    let (stdout, stderr) = run(&root, &["backlinks", "x/dup.md"]);
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        stdout.contains("hub.md"),
+        "曖昧 target でも被リンクに挙がるはず:\n{stdout}\n{stderr}"
     );
 }
 

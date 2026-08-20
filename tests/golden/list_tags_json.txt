@@ -1,8 +1,9 @@
-{"type":"meta","command":"list-tags","count":8}
+{"type":"meta","command":"list-tags","count":9}
 {"tag":"nested","count":2}
 {"tag":"robotics","count":2}
 {"tag":"control","count":1}
 {"tag":"inner","count":1}
+{"tag":"links","count":1}
 {"tag":"localization","count":1}
 {"tag":"misc","count":1}
 {"tag":"slam","count":1}

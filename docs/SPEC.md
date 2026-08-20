@@ -17,6 +17,8 @@ mikke の挙動の正本。CLI 表面・設定キー・出力の意味は安定�
 | `hybrid` | `<クエリ...> --top N(=5) --json` | BM25 + semantic の RRF 融合 |
 | `list-tags` | `--json` | タグ一覧(使用回数降順、同数は tag 名昇順) |
 | `recent` | `[件数(=10)] --json` | date 降順の最近ノート(date 空は除外) |
+| `links` | `<ノート>` | 発リンク一覧(wikilink target をノートへ解決して表示、未解決は明示) |
+| `backlinks` | `<ノート>` | 被リンク一覧(対象ノートを指しうる target を持つノート) |
 | `health` | `--md-report PATH` | 健全性チェック(決定的 md レポート出力可) |
 
 `--json` は stdout を JSON Lines に切り替える(スキーマは「出力フォーマット」参照。テキスト出力・exit code は変えない additive なフラグ)。
@@ -27,10 +29,11 @@ grep の慣習に合わせる。呼び出し側は出力文言でなく exit cod
 
 | 状況 | exit code |
 |---|---|
-| 検索系(find / tag / title / semantic / hybrid)で 1 件以上ヒット。その他コマンドの正常終了 | 0 |
-| 検索系で 0 件 | 1 |
+| 検索系(find / tag / title / semantic / hybrid)で 1 件以上ヒット。links / backlinks で結果 1 件以上。その他コマンドの正常終了 | 0 |
+| 検索系で 0 件。links / backlinks で結果 0 件 | 1 |
 | エラー(設定の型不一致・ルート未特定・index open 失敗・semantic 無効ビルド/無効 repo での semantic / embed 等) | 2 |
 
+- links / backlinks の「結果」は検索系のヒットに準ずる: links は対象 target 数(解決可否を問わず — 未解決の列挙も結果)、backlinks は被リンク元ノート数。`<note>` 引数が解決できない場合(該当なし・複数一致)は結果 0 件でなく入力エラーの 2(「リンクグラフ」参照)
 - 一覧系(list-tags / recent)は「0 件も正常な状態報告」なので 0 のまま(recent は index 生存確認にも使う)
 - `index --check` の frontmatter 破損検出は「検出 = 結果」として 1。index 構築自体の失敗は 2。`mikke index`(`--check` 無し)は破損があっても 0
 - health は問題件数によらず 0(md レポート書き出し失敗等のエラーは 2)
@@ -116,6 +119,32 @@ index が無い場合は検索時に自動 build(clone 直後フォールバッ�
 - **list-tags**: `GROUP BY tag ORDER BY COUNT(*) DESC, tag`。
 - **semantic**: クエリを `query_prefix + query` で encode(normalize)、保存ベクトルとの内積(= 正規化済 cosine)で降順 top_n。**モデル/prefix は保存 metadata を優先**(生成時とエンコード条件を揃える)。
 - **hybrid (RRF)**: 各ストリームから `top_n * candidate_factor` 取得 → rank を 1 始まりで付与 → `score += weight * 1/(rrf_k + rank)`。semantic 未構築時は vector 重み 0 で**再正規化**し BM25 のみへ degrade(`semantic.enabled` が true なら Note を stderr へ)。結果に `via`(bm25 / vec / bm25+vec)と score を表示。
+
+## リンクグラフ(links / backlinks)
+
+index の links テーブル(wikilink の生 target — 「ノートの解釈」参照)を読み、ノート間グラフを引く。出力はテキストのみ(`--json` は未対応。追加する場合も additive な拡張として扱う)。
+
+### `<note>` 引数の解決
+
+他コマンドが `path:` に出す root 相対 path をそのまま受ける。解決手順:
+
+1. `notes.path` との完全一致
+2. 一致しなければ、引数末尾の `.md` を除いた文字列で下記「target → ノートの解決規則」と同じ照合(stem 完全一致 / `.md` 抜きパスの成分末尾一致)
+
+該当 0 件・複数一致は「結果 0 件」と区別して入力エラー(exit 2)。複数一致は silent に 1 件を選ばず、候補 path を stderr へ列挙する。
+
+### target → ノートの解決規則
+
+- `#fragment` は照合前に除去する。ノート部が空(`[[#anchor]]`)は自ノート内アンカーであり対象外(target として数えない)
+- `notes.path` から `.md` を除いた文字列に対する、パス成分単位の末尾一致(`[[note-name]]` の stem 完全一致は 1 成分の末尾一致として包含)。大文字小文字は区別する
+- 複数ノートに一致する target は全件表示する(曖昧さを隠さない)
+- 解決できない target は「(未解決)」として明示的に列挙する(黙って落とさない)。**未解決 = 壊れたリンクとは限らない**: 既定 `exclude_files` の README.md / CLAUDE.md 等、索引対象外ファイルへのリンクは恒常的に未解決になる
+
+### 出力と件数
+
+- **links**: 見出し `'<path>' の発リンク (target N件, 解決 R件 / 未解決 U件):`。N = 対象 target 数(`[[#anchor]]` を除く。N = R + U)。解決したノートを target 昇順(同一 target の複数一致は path 昇順、同一ノートへの重複 target は 1 回)でテキスト形式(「出力フォーマット」)で表示し、続けて未解決 target を `  (未解決) [[<生 target>]]` の 1 行ずつで列挙する。N = 0 なら「wikilink がありません。」
+- **backlinks**: 見出し `'<path>' の被リンク (N件):`。N = 対象ノートを指しうる target を持つノート数。date 降順(date 空は末尾、同 date は path 昇順)でテキスト形式で表示。0 件は「該当するノートが見つかりませんでした。」
+- exit code は「exit code」参照(結果 1 件以上 = 0 / 結果 0 件 = 1 / `<note>` 引数が解決できない = 2)
 
 ## 出力フォーマット
 

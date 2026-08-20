@@ -61,6 +61,8 @@ mikke tag タグ名         # タグ検索
 mikke title キーワード     # タイトル検索
 mikke recent 10           # 最近のノート
 mikke list-tags           # タグ一覧
+mikke links ノート         # 発リンク (wikilink 先をノートへ解決して表示)
+mikke backlinks ノート     # 被リンク (このノートを指すノートの一覧)
 mikke health              # 健全性チェック
 mikke embed               # 埋め込み生成 (semantic feature 必須)
 mikke semantic クエリ      # 意味検索

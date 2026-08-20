@@ -42,4 +42,4 @@ summary: >-
 - [notes/robotics-control.md](notes/robotics-control.md)  -- ロボット制御メモ
 - [notes/short.md](notes/short.md)  -- 短い
 
-合計: 8ノート中 16件の問題 (重複あり)
+合計: 9ノート中 16件の問題 (重複あり)
