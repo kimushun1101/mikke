@@ -1,0 +1,6 @@
+{"type":"meta","command":"recent","count":5}
+{"path":"notes/short.md","title":"短い","date":"2026-06-01","tags":["misc"],"summary":""}
+{"path":"notes/robotics-control.md","title":"ロボット制御メモ","date":"2026-05-10","tags":["control","robotics"],"summary":"PID とモデル予測制御の比較。"}
+{"path":"notes/robotics-slam.md","title":"SLAM の基礎","date":"2026-05-01","tags":["localization","robotics","slam"],"summary":"移動ロボットの自己位置推定と地図構築の基礎。"}
+{"path":"nested/notes/zebra-guide.md","title":"シマウマ観察ガイド","date":"2026-04-10","tags":["nested","zoology"],"summary":"zebra の縞模様の観察手順のまとめ。"}
+{"path":"nested/inner/zebra-inner.md","title":"シマウマ孫ノート","date":"2026-04-05","tags":["inner","nested"],"summary":"孫 repo 側の zebra ノート。"}

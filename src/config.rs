@@ -117,12 +117,12 @@ impl Config {
 
 fn config_error(cfg_path: &Path, msg: &str) -> ! {
     eprintln!("Error: {}: {msg}", cfg_path.display());
-    std::process::exit(1);
+    std::process::exit(2);
 }
 
 fn err_root(msg: &str) -> ! {
     eprintln!("Error: {msg}");
-    std::process::exit(1);
+    std::process::exit(2);
 }
 
 /// 検索対象 repo のルートを決定する。

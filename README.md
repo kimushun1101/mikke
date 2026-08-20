@@ -61,11 +61,15 @@ mikke tag タグ名         # タグ検索
 mikke title キーワード     # タイトル検索
 mikke recent 10           # 最近のノート
 mikke list-tags           # タグ一覧
+mikke links ノート         # 発リンク (wikilink 先をノートへ解決して表示)
+mikke backlinks ノート     # 被リンク (このノートを指すノートの一覧)
 mikke health              # 健全性チェック
 mikke embed               # 埋め込み生成 (semantic feature 必須)
 mikke semantic クエリ      # 意味検索
 mikke hybrid クエリ        # BM25 + semantic の RRF 融合
 ```
+
+検索系コマンド (find / tag / title / semantic / hybrid / recent) と `list-tags` は `--json` で JSON Lines (1 行目メタ行 + 1 件 1 行) を stdout に出力する。jq やスクリプトから安全にパースでき、exit code は変わらない。スキーマは [docs/SPEC.md](docs/SPEC.md) の「出力フォーマット」。
 
 ルートは `--root PATH` 明示指定 → 環境変数 `MIKKE_ROOT` → cwd からの `mikke.toml` (設定を隠したい場合は `.mikke.toml`) 上方探索 → git root の順で決める。git 管理でないフォルダも、`mikke.toml` を置くか `--root` を指定すればそのまま対象にできる。
 
@@ -104,6 +108,8 @@ mikke は AI コーディングエージェントにノート資産を検索さ�
 1. **指示書にスニペットを貼る** — [examples/agents/mikke.md](examples/agents/mikke.md) を、ノートフォルダの `CLAUDE.md` / `AGENTS.md` など使っているツールが読む指示書にそのまま貼る。ツール非依存の検索手順 (root 解決から検証まで) で、どのエージェント CLI でも使える。
 
 2. **再利用可能な手順書として組み込む** — ツールが手順書の仕組みを持つ場合 (例: Claude Code の skill) は、[examples/skills/mikke/SKILL.md](examples/skills/mikke/SKILL.md) を土台にできる。起動条件・find のクエリセマンティクス (語ごと quote の AND 連結)・0 件時のフォールバック手順 (find → hybrid → Grep) まで含む実戦形の例なので、自分の運用・ツールに合わせて調整して使う (Claude Code ならノートフォルダの `.claude/skills/mikke/SKILL.md` にコピー)。
+
+検索系コマンド (find / tag / title / semantic / hybrid) は grep の慣習で **1 件以上ヒット = exit 0 / 0 件 = exit 1 / エラー = exit 2** を返すため、0 件時のフォールバック判定は出力文言でなく exit code で書ける (`if mikke find ...; then` や `mikke find ... || mikke hybrid ...`)。詳細は [docs/SPEC.md](docs/SPEC.md) の「exit code」。
 
 ## 開発
 

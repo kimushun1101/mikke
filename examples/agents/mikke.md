@@ -19,7 +19,9 @@
 - find の対象は title + 本文のみ。tags/summary だけの語は find に当たらない (`tag` / `title` で引く)
 - 複数語は各語 phrase quote の AND 連結。全語共起が必要で、語を増やすほど絞られる。3 文字未満の語が混ざると relevance 無しの date 降順 (出力に明示される)
 - 固有名詞・型番 → `find`。自然文・概念的な問い → `hybrid` (全語共起が稀で find は空振りしやすい)
-- 0 件時の fallback 順: 語を減らす/変える → `hybrid` → 最終手段でファイル内容の直接走査 (grep 等。summary/tags も対象。範囲を絞る)。0 件でも該当ノートは存在しうる
+- 検索系 (find/tag/title/semantic/hybrid) の exit code は grep 慣習: ヒットあり = 0 / 0 件 = 1 / エラー = 2。ヒット有無は出力文言でなく exit code で判定する
+- 出力を機械的にパースする時は `--json` (JSON Lines: 1 行目メタ行 + 1 件 1 行。exit code は同じ)。整形テキストの逆パースはしない
+- 0 件時 (exit 1) の fallback 順: 語を減らす/変える → `hybrid` → 最終手段でファイル内容の直接走査 (grep 等。summary/tags も対象。範囲を絞る)。0 件でも該当ノートは存在しうる
 - 引き当てたい語が本文に無かったら、該当ノート本文へのシノニム追記をユーザーに提案する (将来の検索性向上。無断で書き込まない)
 - トピックが曖昧なら `recent` / `list-tags` で当たりを付けるか、対象をユーザーに確認する
 

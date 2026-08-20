@@ -1,4 +1,4 @@
-//! 検索コマンド群 (find / tag / title / semantic / hybrid / list-tags / recent)。
+//! 検索コマンド群 (find / tag / title / semantic / hybrid / list-tags / recent / links / backlinks)。
 //!
 //! FTS 変換 (fts_query): 空白で語分割 → 各語を個別に `"..."` quote (内部 " は "") → AND 連結。
 //! trigram 制約: 各語 3 文字以上なら `ORDER BY rank` (FTS5 BM25)。1 語でも <3 文字を含めば
@@ -8,6 +8,9 @@
 //! list-tags: GROUP BY tag ORDER BY COUNT(*) DESC, tag。
 //! hybrid RRF: 各ストリーム top_n*candidate_factor → rank 1 始まり → score += w * 1/(rrf_k+rank)。
 //!   semantic 未構築なら vec 重み 0 で再正規化し BM25 のみへ degrade。via に bm25/vec/bm25+vec。
+//! links/backlinks: links テーブル (wikilink の生 target) を読むリンクグラフ。target →
+//!   ノートの解決規則・件数・出力は docs/SPEC.md「リンクグラフ」(テキスト出力のみ)。
+//! --json: stdout を JSON Lines (1 行目メタ行 + 1 件 1 行) に切り替える。スキーマは docs/SPEC.md。
 
 #![allow(dead_code)]
 
@@ -16,15 +19,65 @@ use crate::index;
 use rusqlite::{params, params_from_iter, Connection};
 use std::collections::HashMap;
 
-/// 検索結果 1 件。
+/// 検索結果 1 件。--json ではこのまま 1 行の JSON へ serialize する (field 順 = キー順)。
+#[derive(serde::Serialize)]
 pub struct Hit {
     pub path: String,
     pub title: String,
     pub date: String,
-    pub summary: String,
     pub tags: Vec<String>,
+    pub summary: String,
+    /// semantic/hybrid のみ。JSON は f64 全精度 (テキスト出力の 4 桁丸めと異なる)。
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f64>,
+    /// hybrid のみ (bm25 / vec / bm25+vec)。
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
+}
+
+/// --json の 1 行目メタ行。テキスト見出しが持つ情報 (件数・順序種別・打ち切り・degrade) を
+/// JSON でも失わないための行。hit 行と区別できるよう type: "meta" を付ける。
+#[derive(serde::Serialize)]
+struct Meta {
+    r#type: &'static str,
+    command: &'static str,
+    count: usize,
+    /// find のみ: "relevance" (BM25 順) | "date" (短語 fallback の date 降順)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    order: Option<&'static str>,
+    /// find のみ: bm25_limit 到達による打ち切り (true なら全ヒット数は不明)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capped: Option<bool>,
+    /// hybrid のみ: semantic ストリームが使えず BM25 のみへ degrade したか (未構築・実行時失敗とも)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    degraded: Option<bool>,
+}
+
+impl Meta {
+    fn new(command: &'static str, count: usize) -> Self {
+        Meta {
+            r#type: "meta",
+            command,
+            count,
+            order: None,
+            capped: None,
+            degraded: None,
+        }
+    }
+}
+
+/// 1 行分の JSON を stdout へ出す (JSON モードの唯一の stdout 出口)。
+fn print_json<T: serde::Serialize>(value: &T) {
+    // 通常経路の値 (String/bool/usize/f64) では to_string は失敗しない (非有限 f64 も
+    // serde_json は Err でなく null として出力する)。それでも Err が返る異常値では
+    // panic (exit 101) で落とさず、エラー規約 (docs/SPEC.md「exit code」) の exit 2 で終了する。
+    match serde_json::to_string(value) {
+        Ok(line) => println!("{line}"),
+        Err(e) => {
+            eprintln!("Error: JSON への変換に失敗しました ({e})。");
+            std::process::exit(2);
+        }
+    }
 }
 
 pub fn connect(cfg: &Config) -> Connection {
@@ -33,7 +86,7 @@ pub fn connect(cfg: &Config) -> Connection {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: index を開けません: {e}");
-            std::process::exit(1);
+            std::process::exit(2);
         }
     }
 }
@@ -97,7 +150,14 @@ fn fetch_notes(conn: &Connection, paths: &[String]) -> Vec<Hit> {
     out
 }
 
-fn print_notes(notes: &[Hit]) {
+fn print_notes(notes: &[Hit], json: bool) {
+    if json {
+        // JSON モードの stdout は JSON Lines のみ (0 件文言・sentinel 文は出さない)。
+        for note in notes {
+            print_json(note);
+        }
+        return;
+    }
     if notes.is_empty() {
         println!("該当するノートが見つかりませんでした。");
         return;
@@ -143,7 +203,7 @@ fn query_paths(conn: &Connection, sql: &str, param: &str) -> Vec<String> {
     rows.flatten().collect()
 }
 
-pub fn cmd_tag(cfg: &Config, keyword: &str) {
+pub fn cmd_tag(cfg: &Config, keyword: &str, json: bool) -> usize {
     let conn = connect(cfg);
     let paths = query_paths(
         &conn,
@@ -154,15 +214,25 @@ pub fn cmd_tag(cfg: &Config, keyword: &str) {
         &format!("%{}%", keyword.to_lowercase()),
     );
     if paths.is_empty() {
-        println!("タグ '{keyword}' に一致するノートが見つかりませんでした。");
-        return;
+        // 0 件 early-return 経路。JSON でもメタ行は必ず出す (exit code は main 側で 1)。
+        if json {
+            print_json(&Meta::new("tag", 0));
+        } else {
+            println!("タグ '{keyword}' に一致するノートが見つかりませんでした。");
+        }
+        return 0;
     }
     let notes = fetch_notes(&conn, &paths);
-    println!("タグ '{keyword}' の検索結果 ({}件):\n", notes.len());
-    print_notes(&notes);
+    if json {
+        print_json(&Meta::new("tag", notes.len()));
+    } else {
+        println!("タグ '{keyword}' の検索結果 ({}件):\n", notes.len());
+    }
+    print_notes(&notes, json);
+    notes.len()
 }
 
-pub fn cmd_title(cfg: &Config, keyword: &str) {
+pub fn cmd_title(cfg: &Config, keyword: &str, json: bool) -> usize {
     let conn = connect(cfg);
     let paths = query_paths(
         &conn,
@@ -170,8 +240,13 @@ pub fn cmd_title(cfg: &Config, keyword: &str) {
         &format!("%{}%", keyword.to_lowercase()),
     );
     let notes = fetch_notes(&conn, &paths);
-    println!("タイトル '{keyword}' の検索結果 ({}件):\n", notes.len());
-    print_notes(&notes);
+    if json {
+        print_json(&Meta::new("title", notes.len()));
+    } else {
+        println!("タイトル '{keyword}' の検索結果 ({}件):\n", notes.len());
+    }
+    print_notes(&notes, json);
+    notes.len()
 }
 
 /// keyword を空白で語分割 (空白のみなら keyword 全体を 1 語扱い)。
@@ -237,33 +312,50 @@ fn bm25_ranked_paths(conn: &Connection, keyword: &str, limit: i64) -> Vec<String
     }
 }
 
-pub fn cmd_find(cfg: &Config, words: &[String]) {
-    // find はフラグを持たないため全語を結合 (無クォートの複数語でも語落ちしない)。
+pub fn cmd_find(cfg: &Config, words: &[String], json: bool) -> usize {
+    // 複数語は全語結合 (無クォートの複数語でも語落ちしない)。
     let keyword = words.join(" ");
     let conn = connect(cfg);
     let limit = cfg.bm25_limit;
     let paths = bm25_ranked_paths(&conn, &keyword, limit);
     let notes = fetch_notes(&conn, &paths);
     // 短語 (<3字) を含むと trigram 不可で LIKE フォールバック (date 降順)。順序の正体を正直に出す。
-    let order = if split_terms(&keyword).iter().all(|t| t.chars().count() >= 3) {
-        "BM25 relevance 順"
-    } else {
-        "date 降順 (短語を含み relevance 算出不可)"
-    };
+    let relevance = split_terms(&keyword).iter().all(|t| t.chars().count() >= 3);
     // 上限に達した場合は「全体がこの件数」と誤読されないよう打ち切りを明示する。
-    let capped = if notes.len() as i64 >= limit {
-        format!(" ※上限到達: 上位{limit}件で打ち切り (全ヒット数は不明)")
+    let capped = notes.len() as i64 >= limit;
+    if json {
+        let mut meta = Meta::new("find", notes.len());
+        meta.order = Some(if relevance { "relevance" } else { "date" });
+        meta.capped = Some(capped);
+        print_json(&meta);
     } else {
-        String::new()
-    };
-    println!(
-        "全文検索 '{keyword}' の結果 ({}件, {order}){capped}:\n",
-        notes.len()
-    );
-    print_notes(&notes);
+        let order = if relevance {
+            "BM25 relevance 順"
+        } else {
+            "date 降順 (短語を含み relevance 算出不可)"
+        };
+        let capped_str = if capped {
+            format!(" ※上限到達: 上位{limit}件で打ち切り (全ヒット数は不明)")
+        } else {
+            String::new()
+        };
+        println!(
+            "全文検索 '{keyword}' の結果 ({}件, {order}){capped_str}:\n",
+            notes.len()
+        );
+    }
+    print_notes(&notes, json);
+    notes.len()
 }
 
-pub fn cmd_list_tags(cfg: &Config) {
+/// list-tags --json の 1 行 ({"tag":"...","count":N})。
+#[derive(serde::Serialize)]
+struct TagCount<'a> {
+    tag: &'a str,
+    count: i64,
+}
+
+pub fn cmd_list_tags(cfg: &Config, json: bool) {
     let conn = connect(cfg);
     let mut stmt = conn
         .prepare("SELECT tag, COUNT(*) AS n FROM tags GROUP BY tag ORDER BY n DESC, tag")
@@ -273,13 +365,20 @@ pub fn cmd_list_tags(cfg: &Config) {
         .expect("tags 集計に失敗")
         .flatten()
         .collect();
+    if json {
+        print_json(&Meta::new("list-tags", rows.len()));
+        for (tag, n) in &rows {
+            print_json(&TagCount { tag, count: *n });
+        }
+        return;
+    }
     println!("タグ一覧 ({}件):\n", rows.len());
     for (tag, n) in rows {
         println!("  {tag} ({n}件)");
     }
 }
 
-pub fn cmd_recent(cfg: &Config, count: usize) {
+pub fn cmd_recent(cfg: &Config, count: usize, json: bool) {
     let conn = connect(cfg);
     let mut stmt = conn
         .prepare("SELECT path FROM notes WHERE date != '' ORDER BY date DESC LIMIT ?1")
@@ -290,8 +389,154 @@ pub fn cmd_recent(cfg: &Config, count: usize) {
         .flatten()
         .collect();
     let notes = fetch_notes(&conn, &paths);
-    println!("最近のノート (上位{count}件):\n");
-    print_notes(&notes);
+    if json {
+        print_json(&Meta::new("recent", notes.len()));
+    } else {
+        println!("最近のノート (上位{count}件):\n");
+    }
+    print_notes(&notes, json);
+}
+
+/// notes.path の全件 (path 昇順)。links テーブルは小さく、target の解決は全走査で足りる。
+fn all_note_paths(conn: &Connection) -> Vec<String> {
+    let mut stmt = conn
+        .prepare("SELECT path FROM notes ORDER BY path")
+        .expect("notes SELECT の準備に失敗");
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .expect("notes SELECT に失敗");
+    rows.flatten().collect()
+}
+
+/// wikilink target からノート部を取り出す (`#fragment` と末尾の `.md` は照合前に除去)。
+/// ノート部が空 (`[[#anchor]]`) は自ノート内アンカーで対象外 → None。
+fn target_note_part(target: &str) -> Option<&str> {
+    let note = target.split('#').next().unwrap_or(target);
+    let note = note.strip_suffix(".md").unwrap_or(note);
+    if note.is_empty() {
+        None
+    } else {
+        Some(note)
+    }
+}
+
+/// target 表現 (fragment 除去済) が path のノートを指しうるか。
+/// 規則: path から `.md` を除いた文字列に対する、パス成分単位の末尾一致
+/// (`[[note-name]]` の stem 完全一致は 1 成分の末尾一致として包含)。大文字小文字は区別する。
+fn target_matches(path: &str, target: &str) -> bool {
+    let path_no_md = path.strip_suffix(".md").unwrap_or(path);
+    path_no_md == target || path_no_md.ends_with(&format!("/{target}"))
+}
+
+/// links / backlinks の `<note>` 引数を root 相対 path へ解決する。
+/// 完全一致 → 引数の `.md` を除いた文字列で target と同じ成分末尾一致のフォールバック。
+/// 該当なし・複数一致は「結果 0 件」と区別して入力エラーの exit 2
+/// (複数一致は silent に 1 件を選ばず、候補 path を stderr へ列挙する)。
+fn resolve_note_arg(conn: &Connection, arg: &str) -> String {
+    let paths = all_note_paths(conn);
+    if paths.iter().any(|p| p == arg) {
+        return arg.to_string();
+    }
+    let q = arg.strip_suffix(".md").unwrap_or(arg);
+    let matches: Vec<&String> = paths.iter().filter(|p| target_matches(p, q)).collect();
+    match matches.len() {
+        0 => {
+            eprintln!("Error: ノート '{arg}' が見つかりません (root 相対 path か stem で指定)。");
+            std::process::exit(2);
+        }
+        1 => matches[0].clone(),
+        _ => {
+            eprintln!("Error: ノート '{arg}' が複数に一致します。path で一意に指定してください:");
+            for p in matches {
+                eprintln!("  {p}");
+            }
+            std::process::exit(2);
+        }
+    }
+}
+
+/// 発リンク一覧: 対象ノートの wikilink target を列挙し、ノートへ解決して表示する。
+/// 返り値は結果件数 (= 対象 target 数。未解決の列挙も結果に数える。0 件は main 側で exit 1)。
+pub fn cmd_links(cfg: &Config, note: &str) -> usize {
+    let conn = connect(cfg);
+    let path = resolve_note_arg(&conn, note);
+    let targets = query_paths(
+        &conn,
+        "SELECT target FROM links WHERE path = ?1 ORDER BY target",
+        &path,
+    );
+    let all_paths = all_note_paths(&conn);
+
+    let mut resolved_paths: Vec<String> = Vec::new();
+    let mut unresolved: Vec<&String> = Vec::new();
+    let mut counted = 0usize;
+    let mut resolved_count = 0usize;
+    for target in &targets {
+        let Some(note_part) = target_note_part(target) else {
+            continue; // `[[#anchor]]` は自ノート内アンカーで対象外
+        };
+        counted += 1;
+        let hits: Vec<&String> = all_paths
+            .iter()
+            .filter(|p| target_matches(p, note_part))
+            .collect();
+        if hits.is_empty() {
+            unresolved.push(target);
+        } else {
+            resolved_count += 1;
+            // 複数一致は全件表示 (曖昧さを隠さない)。同一ノートへの重複 target は 1 回だけ
+            for h in hits {
+                if !resolved_paths.contains(h) {
+                    resolved_paths.push(h.clone());
+                }
+            }
+        }
+    }
+
+    println!(
+        "'{path}' の発リンク (target {counted}件, 解決 {resolved_count}件 / 未解決 {}件):\n",
+        unresolved.len()
+    );
+    if counted == 0 {
+        println!("wikilink がありません。");
+        return 0;
+    }
+    let notes = fetch_notes(&conn, &resolved_paths);
+    if !notes.is_empty() {
+        print_notes(&notes, false);
+    }
+    // 解決できない target は黙って落とさず明示列挙 (未解決 = 壊れたリンクとは限らない — docs/SPEC.md)
+    for target in unresolved {
+        println!("  (未解決) [[{target}]]");
+    }
+    counted
+}
+
+/// 被リンク一覧: 対象ノートを指しうる target を持つノートを表示する。返り値は結果件数。
+pub fn cmd_backlinks(cfg: &Config, note: &str) -> usize {
+    let conn = connect(cfg);
+    let path = resolve_note_arg(&conn, note);
+    let mut stmt = conn
+        .prepare("SELECT path, target FROM links ORDER BY path, target")
+        .expect("links SELECT の準備に失敗");
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .expect("links SELECT に失敗");
+    let mut sources: Vec<String> = Vec::new();
+    for (src, target) in rows.flatten() {
+        let Some(note_part) = target_note_part(&target) else {
+            continue;
+        };
+        if target_matches(&path, note_part) && !sources.contains(&src) {
+            sources.push(src);
+        }
+    }
+    let mut notes = fetch_notes(&conn, &sources);
+    // tag/title と同じ date 降順 (date 空は末尾)、同 date は path 昇順で決定的に
+    notes.sort_by(|a, b| b.date.cmp(&a.date).then(a.path.cmp(&b.path)));
+    println!("'{path}' の被リンク ({}件):\n", notes.len());
+    print_notes(&notes, false);
+    notes.len()
 }
 
 fn embeddings_available(cfg: &Config) -> bool {
@@ -299,7 +544,7 @@ fn embeddings_available(cfg: &Config) -> bool {
         && cfg.embeddings_dir().join("metadata.json").exists()
 }
 
-pub fn cmd_semantic(cfg: &Config, query: &str, top: usize) {
+pub fn cmd_semantic(cfg: &Config, query: &str, top: usize, json: bool) -> usize {
     #[cfg(feature = "semantic")]
     {
         let ranked = match crate::embed::semantic_ranked(cfg, query, top) {
@@ -307,7 +552,7 @@ pub fn cmd_semantic(cfg: &Config, query: &str, top: usize) {
             Err(e) => {
                 eprintln!("Error: {e}。");
                 eprintln!("  mikke embed を実行してください (semantic feature が必要)。");
-                std::process::exit(1);
+                std::process::exit(2);
             }
         };
         let conn = connect(cfg);
@@ -317,16 +562,21 @@ pub fn cmd_semantic(cfg: &Config, query: &str, top: usize) {
         for n in &mut notes {
             n.score = Some(*scores.get(n.path.as_str()).unwrap_or(&0.0));
         }
-        println!("セマンティック検索 '{query}' の結果 (上位{top}件):\n");
-        print_notes(&notes);
+        if json {
+            print_json(&Meta::new("semantic", notes.len()));
+        } else {
+            println!("セマンティック検索 '{query}' の結果 (上位{top}件):\n");
+        }
+        print_notes(&notes, json);
+        notes.len()
     }
     #[cfg(not(feature = "semantic"))]
     {
-        let _ = (cfg, query, top);
+        let _ = (cfg, query, top, json);
         // feature 無効ビルドでは silent に劣化させず明示エラーで exit する。
         eprintln!("Error: semantic 検索はこのビルドで無効です (cargo build --features semantic で有効化)。");
         eprintln!("  semantic 付きビルドを使うか、find/hybrid を使ってください。");
-        std::process::exit(1);
+        std::process::exit(2);
     }
 }
 
@@ -357,7 +607,7 @@ fn semantic_stream(cfg: &Config, query: &str, depth: usize) -> Option<Vec<String
 }
 
 /// BM25 (キーワード) と semantic (意味) を RRF 融合するハイブリッド検索。
-pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize) {
+pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize, json: bool) -> usize {
     let candidate_depth = top as i64 * cfg.candidate_factor; // 各ストリームから多めに取って融合する
     let conn = connect(cfg);
 
@@ -432,11 +682,55 @@ pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize) {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let mode = if has_vector {
-        "BM25 + semantic"
+    if json {
+        let mut meta = Meta::new("hybrid", notes.len());
+        meta.degraded = Some(!has_vector);
+        print_json(&meta);
     } else {
-        "BM25 のみ (semantic 未構築)"
-    };
-    println!("ハイブリッド検索 '{query}' の結果 (上位{top}件, {mode}):\n");
-    print_notes(&notes);
+        let mode = if has_vector {
+            "BM25 + semantic"
+        } else {
+            "BM25 のみ (semantic 未構築)"
+        };
+        println!("ハイブリッド検索 '{query}' の結果 (上位{top}件, {mode}):\n");
+    }
+    print_notes(&notes, json);
+    notes.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 成分末尾一致は `/` 境界で切る — 文字列 suffix 一致 (`[[note]]` が
+    /// `notes/my-note.md` に当たる類の偽陽性) を否定する。
+    #[test]
+    fn target_matches_component_boundary_not_string_suffix() {
+        assert!(!target_matches("notes/my-note.md", "note"));
+        assert!(!target_matches("notes/my-note.md", "tes/my-note"));
+        assert!(target_matches("notes/my-note.md", "my-note"));
+        assert!(target_matches("notes/my-note.md", "notes/my-note"));
+    }
+
+    /// target 末尾の `.md` は fragment と同じ前処理で除く —
+    /// `[[notes/short.md]]` 形式が path 側の `.md` 除去と対で解決される。
+    #[test]
+    fn target_note_part_strips_trailing_md() {
+        assert_eq!(target_note_part("notes/short.md"), Some("notes/short"));
+        assert_eq!(target_note_part("short.md"), Some("short"));
+        // fragment → `.md` の順で除く
+        assert_eq!(target_note_part("notes/short.md#sec"), Some("notes/short"));
+    }
+
+    /// `#fragment` は照合前に除去され、fragment 付き target が解決できる。
+    /// ノート部が空 (`[[#anchor]]`) の対象外化は fixture link-hub.md の
+    /// `[[#規則]]` + golden links_hub.txt (target 4件) が e2e で固定済み。
+    #[test]
+    fn target_note_part_strips_fragment() {
+        assert_eq!(target_note_part("x#sec"), Some("x"));
+        assert_eq!(
+            target_note_part("filename-title#由来"),
+            Some("filename-title")
+        );
+    }
 }

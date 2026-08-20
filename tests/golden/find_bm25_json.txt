@@ -1,0 +1,2 @@
+{"type":"meta","command":"find","count":1,"order":"relevance","capped":false}
+{"path":"notes/robotics-slam.md","title":"SLAM の基礎","date":"2026-05-01","tags":["localization","robotics","slam"],"summary":"移動ロボットの自己位置推定と地図構築の基礎。"}
