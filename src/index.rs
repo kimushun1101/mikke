@@ -109,7 +109,7 @@ pub fn build_to(cfg: &Config, use_stderr: bool) -> Vec<(String, String, String)>
     let _ = std::fs::remove_file(&index_path);
     let conn = Connection::open(&index_path).unwrap_or_else(|e| {
         eprintln!("Error: index を作成できません: {e}");
-        std::process::exit(1);
+        std::process::exit(2);
     });
     conn.execute_batch(SCHEMA).expect("schema 作成に失敗");
 
@@ -219,6 +219,7 @@ pub fn cmd_index(cfg: &Config, check: bool) {
             "Error: frontmatter 破損 {}件 (--check 指定のため非 0 で終了)",
             issues.len()
         );
+        // 「検出 = 結果」なので 1 (構築自体の失敗 = 2 と区別 — docs/SPEC.md「exit code」)
         std::process::exit(1);
     }
 }

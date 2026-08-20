@@ -1,0 +1,16 @@
+'notes/link-hub.md' の発リンク (target 4件, 解決 3件 / 未解決 1件):
+
+  filename-title
+    path: notes/filename-title.md
+    summary: (なし — 要約未設定。内容は path を開いて確認)
+
+  見出しからのタイトル
+    path: notes/no-frontmatter.md
+    summary: (なし — 要約未設定。内容は path を開いて確認)
+
+  短い (2026-06-01)
+    path: notes/short.md
+    tags: misc
+    summary: (なし — 要約未設定。内容は path を開いて確認)
+
+  (未解決) [[missing-note]]

@@ -1,0 +1,3 @@
+{"type":"meta","command":"tag","count":2}
+{"path":"notes/robotics-control.md","title":"ロボット制御メモ","date":"2026-05-10","tags":["control","robotics"],"summary":"PID とモデル予測制御の比較。"}
+{"path":"notes/robotics-slam.md","title":"SLAM の基礎","date":"2026-05-01","tags":["localization","robotics","slam"],"summary":"移動ロボットの自己位置推定と地図構築の基礎。"}

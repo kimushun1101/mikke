@@ -51,16 +51,25 @@ enum Command {
     Find {
         #[arg(required = true, value_name = "検索語")]
         words: Vec<String>,
+        /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
+        #[arg(long)]
+        json: bool,
     },
     /// タグ検索 (部分一致, date 降順)
     Tag {
         #[arg(value_name = "タグ名")]
         keyword: String,
+        /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
+        #[arg(long)]
+        json: bool,
     },
     /// タイトル検索 (部分一致, date 降順)
     Title {
         #[arg(value_name = "キーワード")]
         keyword: String,
+        /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
+        #[arg(long)]
+        json: bool,
     },
     /// セマンティック検索
     Semantic {
@@ -68,6 +77,9 @@ enum Command {
         query: Vec<String>,
         #[arg(long, default_value_t = 5, value_name = "N")]
         top: usize,
+        /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
+        #[arg(long)]
+        json: bool,
     },
     /// ハイブリッド検索 (BM25 + semantic の RRF 融合)。埋め込み未構築なら BM25 のみへ degrade
     Hybrid {
@@ -75,14 +87,34 @@ enum Command {
         query: Vec<String>,
         #[arg(long, default_value_t = 5, value_name = "N")]
         top: usize,
+        /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
+        #[arg(long)]
+        json: bool,
     },
     /// タグ一覧 (使用回数順)
     #[command(name = "list-tags")]
-    ListTags,
+    ListTags {
+        /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
+        #[arg(long)]
+        json: bool,
+    },
     /// 最近のノート
     Recent {
         #[arg(default_value_t = 10, value_name = "件数")]
         count: usize,
+        /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
+        #[arg(long)]
+        json: bool,
+    },
+    /// 発リンク一覧 (対象ノートの wikilink をリンク先ノートへ解決して表示)
+    Links {
+        #[arg(value_name = "ノート")]
+        note: String,
+    },
+    /// 被リンク一覧 (対象ノートへ wikilink を張るノートを表示)
+    Backlinks {
+        #[arg(value_name = "ノート")]
+        note: String,
     },
     /// ノート repo の健全性チェック
     Health {
@@ -97,27 +129,52 @@ fn main() {
     let root = config::resolve_root(cli.root.as_deref());
     let cfg = config::load_config(root);
 
-    match cli.command {
-        Command::Index { check } => index::cmd_index(&cfg, check),
-        Command::Find { words } => search::cmd_find(&cfg, &words),
-        Command::Tag { keyword } => search::cmd_tag(&cfg, &keyword),
-        Command::Title { keyword } => search::cmd_title(&cfg, &keyword),
-        Command::ListTags => search::cmd_list_tags(&cfg),
-        Command::Recent { count } => search::cmd_recent(&cfg, count),
-        Command::Semantic { query, top } => search::cmd_semantic(&cfg, &query.join(" "), top),
-        Command::Hybrid { query, top } => search::cmd_hybrid(&cfg, &query.join(" "), top),
-        Command::Health { md_report } => health::cmd_health(&cfg, md_report.as_deref()),
+    // 検索系 (find/tag/title/semantic/hybrid) と links/backlinks は結果件数を返し、
+    // 0 件なら grep 慣習で exit 1 にする (docs/SPEC.md「exit code」)。
+    // 一覧系等は 0 件も正常な状態報告なので None。
+    let hits: Option<usize> = match cli.command {
+        Command::Index { check } => {
+            index::cmd_index(&cfg, check);
+            None
+        }
+        Command::Find { words, json } => Some(search::cmd_find(&cfg, &words, json)),
+        Command::Tag { keyword, json } => Some(search::cmd_tag(&cfg, &keyword, json)),
+        Command::Title { keyword, json } => Some(search::cmd_title(&cfg, &keyword, json)),
+        Command::ListTags { json } => {
+            search::cmd_list_tags(&cfg, json);
+            None
+        }
+        Command::Recent { count, json } => {
+            search::cmd_recent(&cfg, count, json);
+            None
+        }
+        Command::Semantic { query, top, json } => {
+            Some(search::cmd_semantic(&cfg, &query.join(" "), top, json))
+        }
+        Command::Hybrid { query, top, json } => {
+            Some(search::cmd_hybrid(&cfg, &query.join(" "), top, json))
+        }
+        Command::Links { note } => Some(search::cmd_links(&cfg, &note)),
+        Command::Backlinks { note } => Some(search::cmd_backlinks(&cfg, &note)),
+        Command::Health { md_report } => {
+            health::cmd_health(&cfg, md_report.as_deref());
+            None
+        }
         Command::Embed { force } => {
             #[cfg(feature = "semantic")]
             {
                 embed::cmd_embed(&cfg, force);
+                None
             }
             #[cfg(not(feature = "semantic"))]
             {
                 let _ = force;
                 eprintln!("Error: このビルドは semantic 無効です (cargo build --features semantic で有効化)。");
-                std::process::exit(1);
+                std::process::exit(2)
             }
         }
+    };
+    if hits == Some(0) {
+        std::process::exit(1);
     }
 }

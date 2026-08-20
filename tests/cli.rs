@@ -217,7 +217,7 @@ fn parent_exclude_not_leaked_into_nested() {
     );
 }
 
-/// 壊れたネスト repo 設定は silent に親規則で走査せず、path 付きで非 0 終了する。
+/// 壊れたネスト repo 設定は silent に親規則で走査せず、path 付きで exit 2 する。
 #[test]
 fn broken_nested_config_fails_loudly() {
     let root = temp_repo(
@@ -233,7 +233,11 @@ fn broken_nested_config_fails_loudly() {
     let out = run_raw(&root, &["index"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let _ = fs::remove_dir_all(&root);
-    assert!(!out.status.success(), "型エラーの子設定で成功してしまった");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "型エラーの子設定はエラー (exit 2) のはず:\n{stderr}"
+    );
     assert!(
         stderr.contains("bad") && stderr.contains("配列"),
         "エラーに子設定の path / 型メッセージが無い:\n{stderr}"
@@ -510,7 +514,7 @@ fn version_full() {
 
 // --- semantic (embed / semantic / hybrid) ---
 
-/// semantic 無効 repo での embed は明示エラーで exit 1 (feature 有効ビルド)。
+/// semantic 無効 repo での embed は明示エラーで exit 2 (feature 有効ビルド)。
 #[cfg(feature = "semantic")]
 #[test]
 fn embed_disabled_repo_errors() {
@@ -521,9 +525,10 @@ fn embed_disabled_repo_errors() {
     let out = run_raw(&root, &["embed"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let _ = fs::remove_dir_all(&root);
-    assert!(
-        !out.status.success(),
-        "semantic 無効 repo で成功してしまった"
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "semantic 無効 repo はエラー (exit 2) のはず:\n{stderr}"
     );
     assert!(
         stderr.contains("semantic が無効"),
@@ -531,7 +536,7 @@ fn embed_disabled_repo_errors() {
     );
 }
 
-/// slim ビルドの embed / semantic はビルド無効の明示エラーで exit 1 (silent 劣化させない)。
+/// slim ビルドの embed / semantic はビルド無効の明示エラーで exit 2 (silent 劣化させない)。
 #[cfg(not(feature = "semantic"))]
 #[test]
 fn embed_slim_build_errors() {
@@ -547,21 +552,51 @@ fn embed_slim_build_errors() {
     let embed_err = String::from_utf8_lossy(&embed_out.stderr).into_owned();
     let semantic_err = String::from_utf8_lossy(&semantic_out.stderr).into_owned();
     let _ = fs::remove_dir_all(&root);
-    assert!(
-        !embed_out.status.success(),
-        "slim ビルドの embed が成功してしまった"
+    assert_eq!(
+        embed_out.status.code(),
+        Some(2),
+        "slim ビルドの embed はエラー (exit 2) のはず:\n{embed_err}"
     );
     assert!(
         embed_err.contains("このビルドは semantic 無効です"),
         "embed のビルド無効メッセージが無い:\n{embed_err}"
     );
-    assert!(
-        !semantic_out.status.success(),
-        "slim ビルドの semantic が成功してしまった"
+    assert_eq!(
+        semantic_out.status.code(),
+        Some(2),
+        "slim ビルドの semantic はエラー (exit 2) のはず:\n{semantic_err}"
     );
     assert!(
         semantic_err.contains("このビルドで無効です"),
         "semantic のビルド無効メッセージが無い:\n{semantic_err}"
+    );
+}
+
+/// slim ビルドの semantic --json もビルド無効の明示エラー (stderr + exit 2) のままで、
+/// stdout に部分的な JSON (メタ行等) を出さない (JSON モードの stdout 純度をエラー経路でも保つ)。
+#[cfg(not(feature = "semantic"))]
+#[test]
+fn semantic_slim_json_errors_without_stdout() {
+    let root = temp_repo(
+        "sem-slim-json",
+        &[("mikke.toml", "[scan]\n"), ("a.md", "# A\n\nメモ。\n")],
+    );
+    let out = run_raw(&root, &["semantic", "クエリ", "--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "slim ビルドの semantic --json はエラー (exit 2) のはず:\n{stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "エラー時の stdout に部分的な JSON が出ている:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("このビルドで無効です"),
+        "ビルド無効メッセージが stderr に無い:\n{stderr}"
     );
 }
 
@@ -700,6 +735,315 @@ fn semantic_e2e() {
     );
 
     let _ = fs::remove_dir_all(&root);
+}
+
+// --- exit code (grep 慣習: ヒット=0 / 0件=1 / エラー=2 — docs/SPEC.md「exit code」) ---
+
+/// 検索系はヒットで 0、0 件で 1。一覧系 (list-tags / recent) は 0 件も正常で 0。
+#[test]
+fn search_exit_codes() {
+    let root = temp_repo(
+        "exitcode",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            (
+                "notes/a.md",
+                "---\ntitle: Hit ノート\ntags: [walrus]\n---\n\nquokka のメモ。\n",
+            ),
+            (
+                "notes/b.md",
+                "---\ntitle: Link 元ノート\n---\n\n[[a]] と未解決の [[gone]] へのリンク。\n",
+            ),
+        ],
+    );
+    for (args, expected, label) in [
+        (&["find", "quokka"][..], 0, "find ヒット"),
+        (&["find", "pangolin"][..], 1, "find 0 件"),
+        (&["tag", "walrus"][..], 0, "tag ヒット"),
+        // tag は 0 件専用文言の early-return 経路
+        (&["tag", "pangolin"][..], 1, "tag 0 件"),
+        (&["title", "Hit"][..], 0, "title ヒット"),
+        (&["title", "pangolin"][..], 1, "title 0 件"),
+        (&["hybrid", "quokka"][..], 0, "hybrid ヒット"),
+        (&["hybrid", "pangolin"][..], 1, "hybrid 0 件"),
+        // links は未解決 target も結果に数える (壊れたリンクとは限らない — docs/SPEC.md)
+        (&["links", "notes/b.md"][..], 0, "links ヒット"),
+        (&["links", "notes/a.md"][..], 1, "links 0 件"),
+        (&["backlinks", "notes/a.md"][..], 0, "backlinks ヒット"),
+        (&["backlinks", "notes/b.md"][..], 1, "backlinks 0 件"),
+        (&["list-tags"][..], 0, "list-tags"),
+        // date 付きノートが無く 0 件だが、状態報告として 0 (index 生存確認に使う)
+        (&["recent", "5"][..], 0, "recent 0 件"),
+    ] {
+        let out = run_raw(&root, args);
+        assert_eq!(
+            out.status.code(),
+            Some(expected),
+            "{label} の exit code が {expected} でない:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// index --check の frontmatter 破損検出は「検出 = 結果」の exit 1、--check 無しは 0。
+#[test]
+fn index_check_exit_codes() {
+    let root = temp_repo(
+        "exitcode-chk",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            // 閉じ --- 欠落の frontmatter 破損
+            ("bad.md", "---\ntitle: Bad\n\n本文。\n"),
+        ],
+    );
+    let out = run_raw(&root, &["index", "--check"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "--check の破損検出は exit 1 のはず:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = run_raw(&root, &["index"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "--check 無しは破損があっても exit 0 のはず:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// 設定の型エラーは検索系でもエラーとして exit 2 (0 件の 1 と区別する)。
+#[test]
+fn config_error_exit_code() {
+    let root = temp_repo(
+        "exitcode-cfg",
+        &[
+            // include を文字列で書く型エラー (配列必須)
+            ("mikke.toml", "[scan]\ninclude = \"notes\"\n"),
+            ("notes/a.md", "# A\n\nquokka のメモ。\n"),
+        ],
+    );
+    let out = run_raw(&root, &["find", "quokka"]);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "壊れ設定はエラー (exit 2) のはず:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// --- links / backlinks (リンクグラフ — docs/SPEC.md「リンクグラフ」) ---
+
+/// `<note>` 引数の複数一致は silent に 1 件を選ばず、候補を stderr へ列挙して exit 2。
+#[test]
+fn links_ambiguous_note_arg_errors() {
+    let root = temp_repo(
+        "links-ambig-arg",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            ("x/dup.md", "# X\n\n重複名ノートその 1。\n"),
+            ("y/dup.md", "# Y\n\n重複名ノートその 2。\n"),
+        ],
+    );
+    let out = run_raw(&root, &["links", "dup"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "複数一致は入力エラー (exit 2) のはず:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("x/dup.md") && stderr.contains("y/dup.md"),
+        "候補の path が stderr に列挙されていない:\n{stderr}"
+    );
+}
+
+/// `<note>` が見つからない場合も入力エラーとして exit 2 (結果 0 件の 1 と区別)。
+#[test]
+fn links_unknown_note_errors() {
+    let root = temp_repo(
+        "links-unknown",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            ("notes/a.md", "# A\n\n通常ノート。\n"),
+        ],
+    );
+    let out = run_raw(&root, &["links", "nosuch"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "未知ノートは入力エラー (exit 2) のはず:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("見つかりません"),
+        "未発見メッセージが無い:\n{stderr}"
+    );
+}
+
+/// 複数ノートに一致する target は全件表示する (曖昧さを隠さない)。backlinks 側も
+/// 「指しうる」で判定するため、同名ノートのどちらからも被リンクに挙がる。
+#[test]
+fn links_ambiguous_target_lists_all() {
+    let root = temp_repo(
+        "links-ambig-target",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            ("hub.md", "# ハブ\n\n同名ノートへの [[dup]] を張る。\n"),
+            ("x/dup.md", "# X\n\n重複名ノートその 1。\n"),
+            ("y/dup.md", "# Y\n\n重複名ノートその 2。\n"),
+        ],
+    );
+    let (stdout, stderr) = run(&root, &["links", "hub.md"]);
+    assert!(
+        stdout.contains("x/dup.md") && stdout.contains("y/dup.md"),
+        "複数一致 target の全件表示になっていない:\n{stdout}\n{stderr}"
+    );
+    let (stdout, stderr) = run(&root, &["backlinks", "x/dup.md"]);
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        stdout.contains("hub.md"),
+        "曖昧 target でも被リンクに挙がるはず:\n{stdout}\n{stderr}"
+    );
+}
+
+// --- --json (JSON Lines — docs/SPEC.md「出力フォーマット」) ---
+
+/// --json は stdout の全行が JSON としてパース可能で、1 行目はコマンド名入りのメタ行。
+#[test]
+fn json_all_lines_parse() {
+    let root = temp_copy("json");
+    let (_o, _e) = run(&root, &["index"]);
+    for (args, command) in [
+        (&["find", "slam", "--json"][..], "find"),
+        (&["tag", "robotics", "--json"][..], "tag"),
+        (&["title", "メモ", "--json"][..], "title"),
+        (&["hybrid", "ロボット", "制御", "--json"][..], "hybrid"),
+        (&["list-tags", "--json"][..], "list-tags"),
+        (&["recent", "5", "--json"][..], "recent"),
+    ] {
+        let (stdout, stderr) = run(&root, args);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert!(!lines.is_empty(), "{command}: 出力が空:\n{stderr}");
+        for line in &lines {
+            serde_json::from_str::<serde_json::Value>(line).unwrap_or_else(|e| {
+                panic!("{command}: JSON でない行 ({e}):\n{line}\nstderr:\n{stderr}")
+            });
+        }
+        let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(meta["type"], "meta", "{command}: 1 行目がメタ行でない");
+        assert_eq!(
+            meta["command"], command,
+            "{command}: メタ行の command 不一致"
+        );
+        assert_eq!(
+            meta["count"].as_u64().unwrap() as usize,
+            lines.len() - 1,
+            "{command}: メタ行の count と hit 行数の不一致:\n{stdout}"
+        );
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// --json の 0 件時はメタ行 (count: 0) のみで、exit code は現行どおり 1。
+/// tag は 0 件専用文言の early-return 経路、title は共通経路 — 各コマンドで対称に固定する。
+#[test]
+fn json_zero_hits_meta_only() {
+    let root = temp_copy("json0");
+    let (_o, _e) = run(&root, &["index"]);
+    for (args, command) in [
+        (&["find", "pangolin", "--json"][..], "find"),
+        (&["tag", "pangolin", "--json"][..], "tag"),
+        (&["title", "pangolin", "--json"][..], "title"),
+    ] {
+        let out = run_raw(&root, args);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{command}: --json でも 0 件は exit 1 のはず"
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "{command}: 0 件時はメタ行のみのはず:\n{stdout}"
+        );
+        let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(meta["type"], "meta", "{command}: 1 行目がメタ行でない");
+        assert_eq!(
+            meta["command"], command,
+            "{command}: メタ行の command 不一致"
+        );
+        assert_eq!(meta["count"], 0, "{command}: count が 0 でない");
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// index 未作成 repo での --json 初回実行 (auto-build 発動) でも stdout は JSON Lines のみで、
+/// auto-build の告知は stderr に出る (SPEC「保証」: clone 直後の初回実行でも安全にパイプできる)。
+#[test]
+fn json_auto_build_stdout_stays_pure() {
+    let root = temp_repo(
+        "json-autobuild",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            (
+                "notes/a.md",
+                "---\ntitle: Auto ノート\ntags: [quokka]\n---\n\nquokka のメモ。\n",
+            ),
+        ],
+    );
+    // index は事前に作らない — find --json 自体が auto-build を発動する
+    let (stdout, stderr) = run(&root, &["find", "quokka", "--json"]);
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        stderr.contains("インデックスが無いため生成しています"),
+        "auto-build 告知が stderr に無い (前提崩れ):\n{stderr}"
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(!lines.is_empty(), "出力が空:\n{stderr}");
+    for line in &lines {
+        serde_json::from_str::<serde_json::Value>(line).unwrap_or_else(|e| {
+            panic!("auto-build 時に stdout へ JSON でない行が混入 ({e}):\n{line}\nstdout 全体:\n{stdout}")
+        });
+    }
+    let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(meta["command"], "find", "1 行目がメタ行でない:\n{stdout}");
+}
+
+/// 複数行 summary もエスケープされて 1 件 1 行が保たれる (行指向パースが壊れない —
+/// テキスト出力ではラベル無しの生テキスト行になる既知の弱点への対策)。
+#[test]
+fn json_multiline_summary_stays_single_line() {
+    let root = temp_repo(
+        "json-ml",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            (
+                "notes/a.md",
+                "---\ntitle: 改行 summary\nsummary: |\n  1 行目\n  2 行目\ntags: [quokka]\n---\n\nquokka のメモ。\n",
+            ),
+        ],
+    );
+    let (stdout, stderr) = run(&root, &["find", "quokka", "--json"]);
+    let _ = fs::remove_dir_all(&root);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "メタ行 + hit 1 行のはず:\n{stdout}\n{stderr}"
+    );
+    let hit: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert!(
+        hit["summary"].as_str().unwrap().contains('\n'),
+        "summary の改行が保持されていない:\n{stdout}"
+    );
 }
 
 /// health --md-report の生成ファイルを golden と比較 (決定的・可搬リンク)。

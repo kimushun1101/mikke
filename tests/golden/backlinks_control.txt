@@ -1,0 +1,7 @@
+'notes/robotics-control.md' の被リンク (1件):
+
+  SLAM の基礎 (2026-05-01)
+    path: notes/robotics-slam.md
+    tags: localization, robotics, slam
+    summary: 移動ロボットの自己位置推定と地図構築の基礎。
+
