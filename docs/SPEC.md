@@ -138,7 +138,7 @@ score/via は semantic/hybrid のみ。**summary 欠落を空白で黙らせな�
 
 **保証**: JSON モードの stdout には JSON Lines 以外を出さない。auto-build の告知・hybrid degrade の Note・Warning 類は従来どおり stderr のため、clone 直後の初回実行でも安全にパイプできる。
 
-- **メタ行(常に 1 行目)**: `{"type":"meta","command":"<サブコマンド名>","count":N}`。テキスト見出しが持つ情報を JSON でも失わないため、find は `"order"`(`"relevance"` = BM25 順 / `"date"` = 短語 fallback の date 降順)と `"capped"`(`bm25_limit` 到達による打ち切り。true のとき count を全ヒット数と誤読しない)を必ず含み、hybrid は `"degraded"`(semantic 未構築で BM25 のみ)を必ず含む。0 件時はメタ行のみ(hit 行 0 行)
+- **メタ行(常に 1 行目)**: `{"type":"meta","command":"<サブコマンド名>","count":N}`。テキスト見出しが持つ情報を JSON でも失わないため、find は `"order"`(`"relevance"` = BM25 順 / `"date"` = 短語 fallback の date 降順)と `"capped"`(`bm25_limit` 到達 = true。ちょうど limit 件で打ち切りが無い場合も true になる保守的判定 — テキスト出力の打ち切り表示と同一条件。true のとき count を全ヒット数と誤読しない)を必ず含み、hybrid は `"degraded"`(semantic ストリームが使えず BM25 のみになった場合に true。埋め込み未構築のほか、構築済みでも semantic 検索の実行時失敗で true になる)を必ず含む。0 件時はメタ行のみ(hit 行 0 行)
 - **hit 行(2 行目以降、1 件 1 行)**: `{"path":"...","title":"...","date":"...","tags":["a","b"],"summary":"...","score":0.0123,"via":"bm25+vec"}`。`type` フィールドは付けない。score は semantic/hybrid のみ、via は hybrid のみ(semantic は via を設定しない)。summary 空は `""` のまま(テキスト出力の sentinel 文は出さない — JSON では空文字列が欠落の明示になる)。score は f64 全精度で、テキスト出力の 4 桁丸めとは表記が異なる
 - **list-tags**: メタ行(count = タグ数)+ `{"tag":"...","count":N}` を 1 タグ 1 行
 - **スキーマ安定性**: `--json` の出力も安定インターフェース。フィールド追加は互換、既存フィールドの改名・削除・意味変更は breaking

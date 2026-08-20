@@ -46,7 +46,7 @@ struct Meta {
     /// find のみ: bm25_limit 到達による打ち切り (true なら全ヒット数は不明)。
     #[serde(skip_serializing_if = "Option::is_none")]
     capped: Option<bool>,
-    /// hybrid のみ: semantic 未構築で BM25 のみへ degrade したか。
+    /// hybrid のみ: semantic ストリームが使えず BM25 のみへ degrade したか (未構築・実行時失敗とも)。
     #[serde(skip_serializing_if = "Option::is_none")]
     degraded: Option<bool>,
 }
@@ -68,6 +68,7 @@ impl Meta {
 fn print_json<T: serde::Serialize>(value: &T) {
     println!(
         "{}",
+        // serialize 対象は String/bool/usize/有限 f64 のみで to_string は失敗しない (expect は到達不能)。
         serde_json::to_string(value).expect("JSON への変換に失敗")
     );
 }
