@@ -124,7 +124,27 @@ enum Command {
     },
 }
 
+/// Rust が既定で無視する SIGPIPE を既定動作 (プロセス終了) へ戻す。
+///
+/// 既定のままだと `mikke find <語> | head` のように読み手が途中で降りた時点で
+/// `println!` が Err を返し panic (exit 101) する。これはエラーではなく通常のパイプ利用なので、
+/// Unix 慣習どおり SIGPIPE で静かに終わらせる (docs/SPEC.md「exit code」)。
+/// stdout / stderr のどの出力経路にも一律で効くため、出力箇所を個別に直す必要がない。
+#[cfg(unix)]
+fn restore_sigpipe() {
+    // SAFETY: 他スレッド起動前の main 冒頭で 1 回だけ、シグナル処理を既定へ戻すために呼ぶ。
+    unsafe {
+        // 戻り値は直前のハンドラ (ここでは Rust ランタイムが設定した SIG_IGN)。復元予定はないので捨てる。
+        let _ = libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+/// Windows に SIGPIPE は無いので何もしない (docs/SPEC.md「exit code」)。
+#[cfg(not(unix))]
+fn restore_sigpipe() {}
+
 fn main() {
+    restore_sigpipe();
     let cli = Cli::parse();
     let root = config::resolve_root(cli.root.as_deref());
     let cfg = config::load_config(root);
