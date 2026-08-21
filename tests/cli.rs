@@ -1189,6 +1189,77 @@ fn json_multiline_summary_stays_single_line() {
     );
 }
 
+/// パイプの早期終了 (`| head`) で panic (exit 101) しない — 読み手が降りただけでエラーではない
+/// (docs/SPEC.md「exit code」)。text / --json / health の各 stdout 経路を横断で固定する。
+/// SIGPIPE を持たない Windows は対象外。
+#[cfg(unix)]
+#[test]
+fn broken_pipe_does_not_panic() {
+    // head が降りた後も書き続ける量が要る。出力が Linux 既定の pipe バッファ (64KiB) に
+    // 収まってしまうと書き手が書き切って正常終了でき、修正を外しても test が通ってしまう。
+    // 600 ノート + 長めの title で全経路を 64KiB 超にする (実測: find 113KiB /
+    // find --json 122KiB / recent 113KiB / health 84KiB)。
+    // bm25_limit も上げて find のテキスト出力が打ち切られないようにする。
+    let mut files: Vec<(String, String)> = vec![(
+        "mikke.toml".to_string(),
+        "[scan]\n[search]\nbm25_limit = 600\n".to_string(),
+    )];
+    for i in 0..600 {
+        files.push((
+            format!("notes/n{i}.md"),
+            format!(
+                "---\ntitle: パイプ早期終了の検証用ノート {i}\ndate: 2026-01-01\ntags: [quokka]\nsummary: パイプ早期終了の検証用に十分な長さを持たせた要約 {i}\n---\n\nquokka のメモ本文。\n"
+            ),
+        ));
+    }
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+    let root = temp_repo("broken-pipe", &refs);
+    let (_o, _e) = run(&root, &["index"]);
+
+    let mut failures = Vec::new();
+    for args in ["find quokka", "find quokka --json", "recent 600", "health"] {
+        // mikke 自身の終了ステータスを stderr 経由で拾う ($? はパイプ後段のものになるため)
+        let script = format!(
+            "{{ '{bin}' --root '{root}' {args}; echo \"mikke_status=$?\" >&2; }} | head -1 > /dev/null",
+            bin = bin(),
+            root = root.display(),
+        );
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("failed to run sh");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        let status = stderr
+            .lines()
+            .find_map(|l| l.strip_prefix("mikke_status="))
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        if stderr.contains("panicked") || status == "101" {
+            failures.push(format!(
+                "--- mikke {args} | head -1 (mikke_status={status}) ---\n{stderr}"
+            ));
+        }
+        // パイプライン全体の exit code は後段 (head) のもの = 0
+        if out.status.code() != Some(0) {
+            failures.push(format!(
+                "--- mikke {args} | head -1: パイプラインの exit code が {:?} ---\n{stderr}",
+                out.status.code()
+            ));
+        }
+    }
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        failures.is_empty(),
+        "パイプ早期終了で panic した ({}件):\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
 /// health --md-report の生成ファイルを golden と比較 (決定的・可搬リンク)。
 #[test]
 fn golden_md_report() {
