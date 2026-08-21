@@ -169,7 +169,7 @@ fn main() {
             #[cfg(not(feature = "semantic"))]
             {
                 let _ = force;
-                eprintln!("Error: このビルドは semantic 無効です (cargo build --features semantic で有効化)。");
+                eprintln!("Error: このビルドは semantic 無効です (cargo install --git https://github.com/kimushun1101/mikke --features semantic で有効化)。");
                 std::process::exit(2)
             }
         }
