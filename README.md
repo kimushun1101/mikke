@@ -21,7 +21,15 @@ Linux (x86_64) / macOS (Apple Silicon) はインストールスクリプトで�
 curl -fsSL https://raw.githubusercontent.com/kimushun1101/mikke/main/install.sh | sh
 ```
 
-既定で semantic 検索入りの full 版が入る。BM25 のみの slim 版は `| sh -s -- --slim`、配置先やバージョン固定などのオプションは `install.sh --help` を参照。
+既定で semantic 検索入りの full 版が入る。BM25 のみの slim 版は `| sh -s -- --slim`。Linux では glibc バージョン非依存の `-musl` (完全静的リンク) が選ばれるため、distro の glibc は気にしなくてよい。
+
+配置先やバージョン固定などのオプションは、ワンライナーのまま一覧できる:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kimushun1101/mikke/main/install.sh | sh -s -- --help
+```
+
+同じ指定は環境変数 `MIKKE_VARIANT` / `MIKKE_VERSION` / `MIKKE_INSTALL_DIR` / `MIKKE_TARGET` でもできる。ただしパイプで渡す形では変数を前に置く `MIKKE_VARIANT=slim curl ... | sh` は効かない — その代入が付くのは `curl` の側で、スクリプトを実行する `sh` には渡らないため既定の full が入る。`curl ... | MIKKE_VARIANT=slim sh` と後段に付けるか、事前に `export` する。
 
 Windows (x86_64) は PowerShell で:
 
@@ -29,27 +37,37 @@ Windows (x86_64) は PowerShell で:
 irm https://raw.githubusercontent.com/kimushun1101/mikke/main/install.ps1 | iex
 ```
 
-slim 版への切り替えなどのオプションは環境変数で指定する (`install.ps1` 冒頭のコメント参照)。
+`iex` 経由ではパラメータを渡せないため、オプションは実行前に環境変数で指定する:
+
+```powershell
+$env:MIKKE_VARIANT     = "slim"      # full (既定) / slim
+$env:MIKKE_VERSION     = "v0.3.0"    # 既定: latest
+$env:MIKKE_INSTALL_DIR = "C:/tools"  # 既定: $env:LOCALAPPDATA/Programs/mikke
+```
 
 > バイナリは `SHA256SUMS` で検証されるが、入口の `install.sh` / `install.ps1` 自体は main 追従で取得される。入口も固定したい場合は commit SHA 付き raw URL を使う。
 
-cargo でビルドして入れる場合 (既定はスクリプトと違い BM25 のみ)。BM25 のみ (即起動・依存ゼロ):
+cargo でビルドして入れる場合 (既定はスクリプトと違い BM25 のみ)。ビルドにはシステムの C コンパイラ (`cc`) が要る (rusqlite の bundled SQLite ビルド用)。BM25 のみ:
 
 ```bash
-cargo install --git https://github.com/kimushun1101/mikke
+cargo install --git https://github.com/kimushun1101/mikke --locked
 ```
 
 semantic 検索も使う場合 (embedding スタックを同梱):
 
 ```bash
-cargo install --git https://github.com/kimushun1101/mikke --features semantic
+cargo install --git https://github.com/kimushun1101/mikke --locked --features semantic
 ```
 
-> 既に BM25 版を `cargo install` 済みの環境で semantic 版へ切り替える場合は、末尾に `--force` を付ける (既定では既存バイナリを上書きしないため)。
+`--locked` は `Cargo.lock` の依存バージョンをそのまま使う (CI と同じ組み合わせ)。既定では main HEAD が入るので、リリース版に固定するなら `--tag v0.3.0` を足す。
+
+> 同じコマンドの再実行で入れ直せる。feature 構成や commit が変わっていれば `--force` 無しでも `Replacing` となって入れ替わる。source と feature が完全に同一の時だけ `Ignored package ... is already installed` と出て何もせず終わるので、そこだけ `--force` が要る (この時も exit 0 のため、スクリプトからは成功と区別できない)。
+
+> `install.sh` は `~/.local/bin`、`cargo install` は `~/.cargo/bin` と配置先が違う。両方に入れると PATH の先頭側だけが使われる (rustup の shell 設定は `~/.cargo/bin` を先頭に足す)。実際に動く方は `command -v mikke` と `mikke --version` (full 版は `+semantic` 表記) で確認する。
 
 Releases には target 別のビルド済みバイナリのアーカイブ (`mikke-{slim,full}-<target>.tar.gz` / Windows は `.zip`、slim = BM25 のみ / full = semantic 入り、`SHA256SUMS` 付き) を置く。展開して PATH の通った場所に置けばよい。更新はバイナリ差し替え、または `cargo install` の再実行。
 
-> Linux 用は `-gnu` (glibc 動的リンク) と `-musl` (完全静的リンク) の 2 系統がある。`-gnu` はビルド環境の glibc 以降が必要なため、古い distro で `GLIBC_X.YY not found` が出る場合は glibc バージョン非依存の `-musl` を使う。
+> Linux 用は `-gnu` (glibc 動的リンク) と `-musl` (完全静的リンク) の 2 系統がある。スクリプト経由なら `-musl` が選ばれるので意識不要。手動で `-gnu` を選んで古い distro で `GLIBC_X.YY not found` が出る場合は `-musl` に替える。
 
 ## 使い方
 
