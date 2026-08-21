@@ -42,6 +42,12 @@ tokenizers = { version = "0.20", optional = true, default-features = false, feat
 # (safetensors の読み書きは candle-core 経由 = candle_core::safetensors)
 hf-hub = { version = "0.4", optional = true, default-features = false, features = ["ureq"] }
 
+# パイプ早期終了 (`| head` 等) で panic しないよう、Rust 既定の SIGPIPE 無視を解除するためだけに使う
+# (docs/SPEC.md「exit code」)。SIGPIPE を持たない Windows のビルドには入れない。
+# pure Rust で C ツールチェーンを要求しないため musl static ビルドも壊さない。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [profile.release]
 lto = true
 strip = true

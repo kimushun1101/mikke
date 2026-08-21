@@ -1253,6 +1253,7 @@ dependencies = [
  "candle-transformers",
  "clap",
  "hf-hub",
+ "libc",
  "regex",
  "rusqlite",
  "serde",
