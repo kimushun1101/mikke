@@ -586,7 +586,7 @@ pub fn cmd_semantic(cfg: &Config, query: &str, top: usize, json: bool) -> usize 
     {
         let _ = (cfg, query, top, json);
         // feature 無効ビルドでは silent に劣化させず明示エラーで exit する。
-        eprintln!("Error: semantic 検索はこのビルドで無効です (cargo install --git https://github.com/kimushun1101/mikke --features semantic で有効化)。");
+        eprintln!("Error: semantic 検索はこのビルドで無効です (cargo install --git https://github.com/kimushun1101/mikke --locked --features semantic で有効化)。");
         eprintln!("  semantic 付きビルドを使うか、find/hybrid を使ってください。");
         std::process::exit(2);
     }

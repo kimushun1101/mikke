@@ -29,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/kimushun1101/mikke/main/install.sh 
 curl -fsSL https://raw.githubusercontent.com/kimushun1101/mikke/main/install.sh | sh -s -- --help
 ```
 
-同じ指定は環境変数 `MIKKE_VARIANT` / `MIKKE_VERSION` / `MIKKE_INSTALL_DIR` / `MIKKE_TARGET` でもできる。
+同じ指定は環境変数 `MIKKE_VARIANT` / `MIKKE_VERSION` / `MIKKE_INSTALL_DIR` / `MIKKE_TARGET` でもできる。ただしパイプで渡す形では変数を前に置く `MIKKE_VARIANT=slim curl ... | sh` は効かない — その代入が付くのは `curl` の側で、スクリプトを実行する `sh` には渡らないため既定の full が入る。`curl ... | MIKKE_VARIANT=slim sh` と後段に付けるか、事前に `export` する。
 
 Windows (x86_64) は PowerShell で:
 
