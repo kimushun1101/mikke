@@ -56,8 +56,52 @@ jobs:
       - uses: actions/checkout@v7
       - name: run install.sh
         run: sh install.sh --to "$RUNNER_TEMP/bin"
-      - name: run install.sh (slim)
-        run: sh install.sh --slim --to "$RUNNER_TEMP/bin-slim"
+      # HOME 未設定 (cron / systemd / コンテナ) でも --to だけで入ること
+      - name: run install.sh (slim, HOME 未設定)
+        run: env -u HOME sh install.sh --slim --to "$RUNNER_TEMP/bin-slim"
+      # 配置先に mikke という名のディレクトリがある場合、成功行を出さずに失敗すること
+      - name: run install.sh (同名ディレクトリとの衝突)
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin-conflict/mikke"
+          if sh install.sh --slim --to "$RUNNER_TEMP/bin-conflict" >"$RUNNER_TEMP/conflict.log" 2>&1; then
+            cat "$RUNNER_TEMP/conflict.log"
+            echo "失敗するべきところで成功した" >&2
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/conflict.log"
+          if grep -q '^installed:' "$RUNNER_TEMP/conflict.log"; then
+            echo "失敗したのに installed: を出している" >&2
+            exit 1
+          fi
+          [ ! -e "$RUNNER_TEMP/bin-conflict/mikke/mikke" ]
+          # ダウンロード前に弾くこと (無駄な取得をしない)
+          if grep -q '^download:' "$RUNNER_TEMP/conflict.log"; then
+            echo "衝突を検知する前にダウンロードしている" >&2
+            exit 1
+          fi
+      # 配置先の空文字指定を既定へ落とさず error にすること
+      - name: run install.sh (配置先が空文字)
+        run: |
+          for label in '--to' 'MIKKE_INSTALL_DIR'; do
+            if [ "$label" = '--to' ]; then
+              sh install.sh --slim --to "" >"$RUNNER_TEMP/empty.log" 2>&1 && rc=0 || rc=$?
+            else
+              MIKKE_INSTALL_DIR="" sh install.sh --slim >"$RUNNER_TEMP/empty.log" 2>&1 && rc=0 || rc=$?
+            fi
+            cat "$RUNNER_TEMP/empty.log"
+            if [ "$rc" -eq 0 ]; then
+              echo "$label='' で失敗するべきところで成功した" >&2
+              exit 1
+            fi
+            if ! grep -q '配置先が空文字' "$RUNNER_TEMP/empty.log"; then
+              echo "$label='' が空文字として報告されていない" >&2
+              exit 1
+            fi
+            if [ -e "$HOME/.local/bin/mikke" ]; then
+              echo "$label='' なのに既定の配置先へ入れている" >&2
+              exit 1
+            fi
+          done
 
   install-smoke-windows:
     runs-on: windows-latest
