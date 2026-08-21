@@ -6,12 +6,18 @@
 //!   3. タグなし / 4. 要約なし / 5. 低ボリューム / 6. updated未設定 — index ベース。
 //!      index 鮮度は stdout のみ、md レポートには含めない (レポートの決定性を守る)。
 //!
+//! [health] disable に挙げたチェック名 (frontmatter/tags/summary/low_words/updated) は
+//! 項目単位でスキップする (実行bit欠落は exec_bit_prefixes による opt-in のため対象外)。
+//!
 //! md レポート (--md-report): 揮発情報を含めず決定的に生成、改行 LF 固定。
 //! パスはレポート置き場からの相対 md リンク (# は %23、空白/括弧は <> wrap、[] はエスケープ)。
 
 #![allow(dead_code)]
 
-use crate::config::{to_posix, Config};
+use crate::config::{
+    to_posix, Config, HEALTH_CHECK_FRONTMATTER, HEALTH_CHECK_LOW_WORDS, HEALTH_CHECK_SUMMARY,
+    HEALTH_CHECK_TAGS, HEALTH_CHECK_UPDATED,
+};
 use crate::index::mtime_epoch_secs;
 use crate::scan::{iter_notes, scan_frontmatter_issue};
 use crate::search;
@@ -100,13 +106,17 @@ pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
         .and_then(|v| v.parse::<f64>().ok());
     let mut broken: Vec<(String, String, String)> = Vec::new();
     let mut stale_files = 0usize;
+    // frontmatter を disable しても走査ループ自体は index 鮮度カウントのため残す
+    let fm_enabled = !cfg.health_disabled(HEALTH_CHECK_FRONTMATTER);
     for (md_file, rel) in iter_notes(cfg) {
         let rel_posix = to_posix(&rel);
         if skip(&rel_posix, &cfg.scan_skip_prefixes) {
             continue;
         }
-        if let Some((kind, detail)) = scan_frontmatter_issue(&md_file) {
-            broken.push((rel_posix, kind, detail));
+        if fm_enabled {
+            if let Some((kind, detail)) = scan_frontmatter_issue(&md_file) {
+                broken.push((rel_posix, kind, detail));
+            }
         }
         if let Some(gen) = gen_ts {
             if mtime_epoch_secs(&md_file) > gen {
@@ -145,20 +155,27 @@ pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
         }
     }
 
-    // --- index ベースの品質チェック (quality_skip_prefixes を適用) ---
-    let no_tags = rows_filtered(
-        &conn,
+    // --- index ベースの品質チェック (quality_skip_prefixes を適用、disable 指定は項目ごと空に) ---
+    let quality_rows = |check: &str, sql: &str| -> Vec<(String, String)> {
+        if cfg.health_disabled(check) {
+            vec![]
+        } else {
+            rows_filtered(&conn, sql, &cfg.quality_skip_prefixes)
+        }
+    };
+    let no_tags = quality_rows(
+        HEALTH_CHECK_TAGS,
         "SELECT n.path, n.title FROM notes n
          WHERE NOT EXISTS (SELECT 1 FROM tags t WHERE t.path = n.path)
          ORDER BY n.path",
-        &cfg.quality_skip_prefixes,
     );
-    let no_summary = rows_filtered(
-        &conn,
+    let no_summary = quality_rows(
+        HEALTH_CHECK_SUMMARY,
         "SELECT path, title FROM notes WHERE (summary IS NULL OR summary = '') ORDER BY path",
-        &cfg.quality_skip_prefixes,
     );
-    let low_word: Vec<(String, String, i64)> = {
+    let low_word: Vec<(String, String, i64)> = if cfg.health_disabled(HEALTH_CHECK_LOW_WORDS) {
+        vec![]
+    } else {
         let mut stmt = conn
             .prepare("SELECT path, title, word_count FROM notes WHERE word_count < ?1 ORDER BY word_count")
             .expect("health SELECT の準備に失敗");
@@ -174,10 +191,9 @@ pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
         .filter(|(p, _, _)| !skip(p, &cfg.quality_skip_prefixes))
         .collect()
     };
-    let no_updated = rows_filtered(
-        &conn,
+    let no_updated = quality_rows(
+        HEALTH_CHECK_UPDATED,
         "SELECT path, title FROM notes WHERE (updated IS NULL OR updated = '') ORDER BY path",
-        &cfg.quality_skip_prefixes,
     );
     let total: usize = {
         let mut stmt = conn

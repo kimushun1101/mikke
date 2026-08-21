@@ -737,6 +737,149 @@ fn semantic_e2e() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// [health] disable でチェックを項目単位で無効化できる (frontmatter 無し md 運用)。
+#[test]
+fn health_disable_checks() {
+    let root = temp_repo(
+        "health-disable",
+        &[
+            (
+                "mikke.toml",
+                // 低ボリュームは min_words = 0 で発火させない (disable との併用例)
+                "[health]\ndisable = [\"tags\", \"summary\", \"updated\"]\nmin_words = 0\n",
+            ),
+            (
+                "notes/plain.md",
+                "# Plain\n\nfrontmatter を持たない運用のノート。\n",
+            ),
+        ],
+    );
+    run(&root, &["index"]);
+    let out = run_raw(&root, &["health"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        out.status.success(),
+        "health が非 0 で終了した:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("問題のあるノートはありません。"),
+        "disable が効いていない:\n{stdout}\n{stderr}"
+    );
+}
+
+/// 単項目 disable の回帰: low_words だけを抑制し、他の品質チェックは生きている。
+#[test]
+fn health_disable_single_check() {
+    let root = temp_repo(
+        "health-disable-single",
+        &[
+            ("mikke.toml", "[health]\ndisable = [\"low_words\"]\n"),
+            // タグなし・要約なし・低ボリュームを同時に満たす短いノート
+            ("notes/short.md", "# Short\n\n短いメモ。\n"),
+        ],
+    );
+    run(&root, &["index"]);
+    let out = run_raw(&root, &["health"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        out.status.success(),
+        "health が非 0 で終了した:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("低ボリューム"),
+        "disable した low_words が報告されている:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("タグなし") && stdout.contains("要約なし"),
+        "disable していないチェックまで消えている:\n{stdout}"
+    );
+}
+
+/// --md-report でも disable 指定のチェックはレポートから消える。
+#[test]
+fn md_report_respects_disable() {
+    let root = temp_repo(
+        "health-disable-mdreport",
+        &[
+            ("mikke.toml", "[health]\ndisable = [\"low_words\"]\n"),
+            ("notes/short.md", "# Short\n\n短いメモ。\n"),
+        ],
+    );
+    run(&root, &["index"]);
+    let report = root.join("health-report.md");
+    run(&root, &["health", "--md-report", report.to_str().unwrap()]);
+    let got = fs::read_to_string(&report).unwrap();
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        !got.contains("低ボリューム"),
+        "disable した low_words がレポートに残っている:\n{got}"
+    );
+    assert!(
+        got.contains("タグなし") && got.contains("要約なし"),
+        "disable していないチェックがレポートから消えている:\n{got}"
+    );
+}
+
+/// [health] disable の未知チェック名は typo を silent no-op にせず非 0 で終了する。
+#[test]
+fn health_disable_unknown_name_errors() {
+    let root = temp_repo(
+        "health-disable-unknown",
+        &[
+            ("mikke.toml", "[health]\ndisable = [\"tag\"]\n"),
+            ("notes/a.md", "# A\n\nメモ。\n"),
+        ],
+    );
+    let out = run_raw(&root, &["health"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = fs::remove_dir_all(&root);
+    assert!(!out.status.success(), "未知のチェック名で成功してしまった");
+    assert!(
+        stderr.contains("未知のチェック名") && stderr.contains("tag"),
+        "未知チェック名のエラーメッセージが無い:\n{stderr}"
+    );
+}
+
+/// disable = ["frontmatter"] は health の報告だけを止め、
+/// index --check の破損検出 (非 0 終了) はゲートしない。
+#[test]
+fn index_check_ignores_frontmatter_disable() {
+    let root = temp_repo(
+        "health-disable-fm-check",
+        &[
+            ("mikke.toml", "[health]\ndisable = [\"frontmatter\"]\n"),
+            // 閉じ --- が無い破損 frontmatter
+            ("notes/broken.md", "---\ntitle: Broken\n\n# 本文\n"),
+        ],
+    );
+    run(&root, &["index"]);
+    let health = run_raw(&root, &["health"]);
+    let health_stdout = String::from_utf8_lossy(&health.stdout).into_owned();
+    let check = run_raw(&root, &["index", "--check"]);
+    let check_stderr = String::from_utf8_lossy(&check.stderr).into_owned();
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        health.status.success(),
+        "health が非 0 で終了した:\n{health_stdout}"
+    );
+    assert!(
+        !health_stdout.contains("frontmatter 破損"),
+        "disable しても health が破損を報告している:\n{health_stdout}"
+    );
+    assert!(
+        !check.status.success(),
+        "破損があるのに index --check が成功してしまった:\n{check_stderr}"
+    );
+    assert!(
+        check_stderr.contains("frontmatter 破損"),
+        "index --check の破損エラーメッセージが無い:\n{check_stderr}"
+    );
+}
+
 // --- exit code (grep 慣習: ヒット=0 / 0件=1 / エラー=2 — docs/SPEC.md「exit code」) ---
 
 /// 検索系はヒットで 0、0 件で 1。一覧系 (list-tags / recent) は 0 件も正常で 0。
