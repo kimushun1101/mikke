@@ -12,8 +12,11 @@ set -eu
 REPO="kimushun1101/mikke"
 VARIANT="${MIKKE_VARIANT:-full}"
 VERSION="${MIKKE_VERSION:-latest}"
-# 既定の $HOME/.local/bin は引数パースの後に補う (HOME 未設定でも --to を効かせるため)
+# 既定の $HOME/.local/bin は引数パースの後に補う (HOME 未設定でも --to を効かせるため)。
+# 明示指定されたかは別に持つ ("+set" は空文字での指定も set と数える) — 空文字を
+# 黙って既定へ落とすと、意図しない場所へ入ってしまうため error にする。
 INSTALL_DIR="${MIKKE_INSTALL_DIR:-}"
+INSTALL_DIR_SET="${MIKKE_INSTALL_DIR+set}"
 TARGET="${MIKKE_TARGET:-}"
 
 usage() {
@@ -51,7 +54,7 @@ while [ $# -gt 0 ]; do
     --slim) VARIANT=slim ;;
     --full) VARIANT=full ;;
     --version) [ $# -ge 2 ] || err "--version には値が必要 (例: --version v0.2.0)"; VERSION="$2"; shift ;;
-    --to) [ $# -ge 2 ] || err "--to には値が必要"; INSTALL_DIR="$2"; shift ;;
+    --to) [ $# -ge 2 ] || err "--to には値が必要"; INSTALL_DIR="$2"; INSTALL_DIR_SET=set; shift ;;
     --target) [ $# -ge 2 ] || err "--target には値が必要"; TARGET="$2"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) err "不明なオプション: $1 (--help で一覧)" ;;
@@ -60,9 +63,14 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$INSTALL_DIR" ]; then
+  [ -z "$INSTALL_DIR_SET" ] || err "配置先が空文字。--to / MIKKE_INSTALL_DIR にはディレクトリを指定する"
   [ -n "${HOME:-}" ] || err "配置先が決められない (HOME が未設定)。--to DIR か MIKKE_INSTALL_DIR で指定する"
   INSTALL_DIR="$HOME/.local/bin"
 fi
+
+# 同名ディレクトリがあると install は中へ置いてしまうので、ダウンロード前に弾く
+# (配置直前の再検査は不要 — install 後の通常ファイル確認が最終的な砦になる)
+[ ! -d "$INSTALL_DIR/mikke" ] || err "配置先に mikke という名のディレクトリがある: $INSTALL_DIR/mikke (退かすか --to で別の場所を指定)"
 
 command -v curl >/dev/null 2>&1 || err "curl が必要"
 command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || err "sha256sum か shasum が必要"
@@ -130,8 +138,6 @@ printf '%s\n' "verified: SHA256SUMS OK"
 tar xzf "$tmp/$archive" -C "$tmp" mikke || err "アーカイブの展開に失敗 ($archive)"
 { [ -f "$tmp/mikke" ] && [ ! -L "$tmp/mikke" ]; } || err "アーカイブの内容が想定と異なる (mikke が通常ファイルでない)"
 mkdir -p "$INSTALL_DIR" || err "配置先ディレクトリを作れない: $INSTALL_DIR"
-# 同名ディレクトリがあると install は中へ置いてしまうので、先に弾く
-[ ! -d "$INSTALL_DIR/mikke" ] || err "配置先に mikke という名のディレクトリがある: $INSTALL_DIR/mikke (退かすか --to で別の場所を指定)"
 install -m 755 "$tmp/mikke" "$INSTALL_DIR/mikke" || err "配置に失敗: $INSTALL_DIR/mikke"
 [ -f "$INSTALL_DIR/mikke" ] || err "配置後に $INSTALL_DIR/mikke が通常ファイルとして見つからない"
 
