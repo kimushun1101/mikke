@@ -66,6 +66,6 @@ jobs:
       - name: run install.ps1
         shell: pwsh
         run: |
-          $env:MIKKE_VERSION = "v0.2.0"
+          $env:MIKKE_VERSION = "v0.3.0"
           $env:MIKKE_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "bin"
           ./install.ps1
