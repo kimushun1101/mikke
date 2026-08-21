@@ -12,7 +12,8 @@ set -eu
 REPO="kimushun1101/mikke"
 VARIANT="${MIKKE_VARIANT:-full}"
 VERSION="${MIKKE_VERSION:-latest}"
-INSTALL_DIR="${MIKKE_INSTALL_DIR:-$HOME/.local/bin}"
+# 既定の $HOME/.local/bin は引数パースの後に補う (HOME 未設定でも --to を効かせるため)
+INSTALL_DIR="${MIKKE_INSTALL_DIR:-}"
 TARGET="${MIKKE_TARGET:-}"
 
 usage() {
@@ -36,6 +37,15 @@ err() {
   exit 1
 }
 
+# curl の失敗を exit code で出し分ける (22 = HTTP エラー応答 / 5,6,7,28,35 = 接続系)
+curl_err() {
+  case "$2" in
+    22) err "$1に失敗 (HTTP エラー応答)。$3" ;;
+    5|6|7|28|35) err "$1に失敗 (ネットワークに到達できない: curl exit $2)。接続と proxy 設定を確認" ;;
+    *) err "$1に失敗 (curl exit $2)" ;;
+  esac
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --slim) VARIANT=slim ;;
@@ -48,6 +58,11 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+if [ -z "$INSTALL_DIR" ]; then
+  [ -n "${HOME:-}" ] || err "配置先が決められない (HOME が未設定)。--to DIR か MIKKE_INSTALL_DIR で指定する"
+  INSTALL_DIR="$HOME/.local/bin"
+fi
 
 command -v curl >/dev/null 2>&1 || err "curl が必要"
 command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || err "sha256sum か shasum が必要"
@@ -78,7 +93,10 @@ archive="mikke-${VARIANT}-${TARGET}.tar.gz"
 # latest はタグ名に解決してから使う (アーカイブと SHA256SUMS の取得の合間に
 # 新 release が出ても世代がずれないよう、以降は固定タグの URL で取得する)
 if [ "$VERSION" = "latest" ]; then
-  VERSION=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" | sed -n 's|.*/tag/||p')
+  rc=0
+  latest_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest") || rc=$?
+  [ "$rc" -eq 0 ] || curl_err "latest バージョンの解決" "$rc" "Releases が公開されているか確認"
+  VERSION=$(printf '%s\n' "$latest_url" | sed -n 's|.*/tag/||p')
   case "$VERSION" in
     v[0-9]*) ;;
     *) err "latest バージョンの解決に失敗 (取得値: $VERSION)" ;;
@@ -90,9 +108,12 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/mikke-install.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 printf '%s\n' "download: $base/$archive"
-curl -fsSL -o "$tmp/$archive" "$base/$archive" \
-  || err "ダウンロード失敗。この target/version の組に asset が無い可能性 (Releases を確認)"
-curl -fsSL -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" || err "SHA256SUMS の取得に失敗"
+rc=0
+curl -fsSL -o "$tmp/$archive" "$base/$archive" || rc=$?
+[ "$rc" -eq 0 ] || curl_err "ダウンロード" "$rc" "この target/version の組に asset が無い可能性 (Releases を確認)"
+rc=0
+curl -fsSL -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" || rc=$?
+[ "$rc" -eq 0 ] || curl_err "SHA256SUMS の取得" "$rc" "$VERSION の release に SHA256SUMS が無い可能性"
 
 # checksum 検証 (Linux: sha256sum / macOS: shasum)。ファイル名はフィールド完全一致で照合
 # ("*" 付きのバイナリモード形式にも耐える)
@@ -103,15 +124,33 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   printf '%s\n' "$checksum_line" | (cd "$tmp" && shasum -a 256 -c -) >/dev/null || err "checksum 不一致"
 fi
+printf '%s\n' "verified: SHA256SUMS OK"
 
 # mikke メンバーだけを展開し、通常ファイルであることを確認してから配置する
-tar xzf "$tmp/$archive" -C "$tmp" mikke
+tar xzf "$tmp/$archive" -C "$tmp" mikke || err "アーカイブの展開に失敗 ($archive)"
 { [ -f "$tmp/mikke" ] && [ ! -L "$tmp/mikke" ]; } || err "アーカイブの内容が想定と異なる (mikke が通常ファイルでない)"
-mkdir -p "$INSTALL_DIR"
-install -m 755 "$tmp/mikke" "$INSTALL_DIR/mikke"
+mkdir -p "$INSTALL_DIR" || err "配置先ディレクトリを作れない: $INSTALL_DIR"
+# 同名ディレクトリがあると install は中へ置いてしまうので、先に弾く
+[ ! -d "$INSTALL_DIR/mikke" ] || err "配置先に mikke という名のディレクトリがある: $INSTALL_DIR/mikke (退かすか --to で別の場所を指定)"
+install -m 755 "$tmp/mikke" "$INSTALL_DIR/mikke" || err "配置に失敗: $INSTALL_DIR/mikke"
+[ -f "$INSTALL_DIR/mikke" ] || err "配置後に $INSTALL_DIR/mikke が通常ファイルとして見つからない"
 
+# 起動確認まで通ってから成功を名乗る (target 取り違えで動かないバイナリを残さない)
+rc=0
+smoke=$("$INSTALL_DIR/mikke" --version 2>&1) || rc=$?
+if [ "$rc" -ne 0 ]; then
+  printf '%s\n' "$smoke" >&2
+  rm -f "$INSTALL_DIR/mikke" 2>/dev/null || :
+  if [ -e "$INSTALL_DIR/mikke" ]; then
+    leftover="削除できなかったので $INSTALL_DIR/mikke が残っている"
+  else
+    leftover="配置したファイルは削除した"
+  fi
+  err "配置したバイナリがこの環境で起動しない (target: $TARGET, exit $rc)。$leftover。Linux では glibc 非依存の --target x86_64-unknown-linux-musl (既定) を使う"
+fi
+
+printf '%s\n' "version: $smoke"
 printf '%s\n' "installed: $INSTALL_DIR/mikke"
-"$INSTALL_DIR/mikke" --version
 
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) : ;;
