@@ -16,7 +16,7 @@ VERSION="${MIKKE_VERSION:-latest}"
 # 明示指定されたかは別に持つ ("+set" は空文字での指定も set と数える) — 空文字を
 # 黙って既定へ落とすと、意図しない場所へ入ってしまうため error にする。
 INSTALL_DIR="${MIKKE_INSTALL_DIR:-}"
-INSTALL_DIR_SET="${MIKKE_INSTALL_DIR+set}"
+INSTALL_DIR_SET="${MIKKE_INSTALL_DIR+yes}"
 TARGET="${MIKKE_TARGET:-}"
 
 usage() {
@@ -54,7 +54,7 @@ while [ $# -gt 0 ]; do
     --slim) VARIANT=slim ;;
     --full) VARIANT=full ;;
     --version) [ $# -ge 2 ] || err "--version には値が必要 (例: --version v0.2.0)"; VERSION="$2"; shift ;;
-    --to) [ $# -ge 2 ] || err "--to には値が必要"; INSTALL_DIR="$2"; INSTALL_DIR_SET=set; shift ;;
+    --to) [ $# -ge 2 ] || err "--to には値が必要"; INSTALL_DIR="$2"; INSTALL_DIR_SET=yes; shift ;;
     --target) [ $# -ge 2 ] || err "--target には値が必要"; TARGET="$2"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) err "不明なオプション: $1 (--help で一覧)" ;;
