@@ -12,12 +12,12 @@
 #![allow(dead_code)]
 
 use crate::config::{to_posix, Config};
+use crate::index::mtime_epoch_secs;
 use crate::scan::{iter_notes, scan_frontmatter_issue};
 use crate::search;
 use rusqlite::{params, Connection};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::time::UNIX_EPOCH;
 
 type Section = (String, Vec<(String, String)>);
 
@@ -88,7 +88,8 @@ fn rows_filtered(conn: &Connection, sql: &str, prefixes: &[String]) -> Vec<(Stri
 }
 
 pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
-    let conn = search::connect(cfg);
+    // auto_rebuild の鮮度判定は通さない (index 鮮度診断をマスクしないため)
+    let conn = search::connect_no_rebuild(cfg);
 
     // --- filesystem 直接スキャン: frontmatter 破損 + index 鮮度 ---
     let gen_ts: Option<f64> = conn
@@ -108,14 +109,7 @@ pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
             broken.push((rel_posix, kind, detail));
         }
         if let Some(gen) = gen_ts {
-            let mtime = md_file
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
-            if mtime > gen {
+            if mtime_epoch_secs(&md_file) > gen {
                 stale_files += 1;
             }
         }
