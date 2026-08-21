@@ -1195,17 +1195,20 @@ fn json_multiline_summary_stays_single_line() {
 #[cfg(unix)]
 #[test]
 fn broken_pipe_does_not_panic() {
-    // head が降りた後も書き続ける量が要る (数行で終わると pipe バッファに収まり再現しない)。
+    // head が降りた後も書き続ける量が要る。出力が Linux 既定の pipe バッファ (64KiB) に
+    // 収まってしまうと書き手が書き切って正常終了でき、修正を外しても test が通ってしまう。
+    // 600 ノート + 長めの title で全経路を 64KiB 超にする (実測: find 113KiB /
+    // find --json 122KiB / recent 113KiB / health 84KiB)。
     // bm25_limit も上げて find のテキスト出力が打ち切られないようにする。
     let mut files: Vec<(String, String)> = vec![(
         "mikke.toml".to_string(),
-        "[scan]\n[search]\nbm25_limit = 200\n".to_string(),
+        "[scan]\n[search]\nbm25_limit = 600\n".to_string(),
     )];
-    for i in 0..200 {
+    for i in 0..600 {
         files.push((
             format!("notes/n{i}.md"),
             format!(
-                "---\ntitle: ノート {i}\ndate: 2026-01-01\ntags: [quokka]\nsummary: パイプ早期終了の検証用に十分な長さを持たせた要約 {i}\n---\n\nquokka のメモ本文。\n"
+                "---\ntitle: パイプ早期終了の検証用ノート {i}\ndate: 2026-01-01\ntags: [quokka]\nsummary: パイプ早期終了の検証用に十分な長さを持たせた要約 {i}\n---\n\nquokka のメモ本文。\n"
             ),
         ));
     }
@@ -1217,7 +1220,7 @@ fn broken_pipe_does_not_panic() {
     let (_o, _e) = run(&root, &["index"]);
 
     let mut failures = Vec::new();
-    for args in ["find quokka", "find quokka --json", "recent 200", "health"] {
+    for args in ["find quokka", "find quokka --json", "recent 600", "health"] {
         // mikke 自身の終了ステータスを stderr 経由で拾う ($? はパイプ後段のものになるため)
         let script = format!(
             "{{ '{bin}' --root '{root}' {args}; echo \"mikke_status=$?\" >&2; }} | head -1 > /dev/null",

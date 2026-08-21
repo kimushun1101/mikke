@@ -134,7 +134,8 @@ enum Command {
 fn restore_sigpipe() {
     // SAFETY: 他スレッド起動前の main 冒頭で 1 回だけ、シグナル処理を既定へ戻すために呼ぶ。
     unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        // 戻り値は直前のハンドラ (ここでは Rust ランタイムが設定した SIG_IGN)。復元予定はないので捨てる。
+        let _ = libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 }
 

@@ -40,7 +40,7 @@ grep の慣習に合わせる。呼び出し側は出力文言でなく exit cod
 - clap の引数パースエラーは 2(`--help` / `--version` は 0)
 - hybrid の semantic ストリーム失敗は Warning を stderr に出して BM25 で継続する現行挙動のまま。degrade はエラー扱いせず、ヒット有無のみで判定する
 - `--json` は exit code を変えない(検索系の 0 件時はメタ行のみ出して 1)。JSON への変換失敗は panic(101)にせずエラーの 2(通常経路では起きない — 非有限 f64 も serde_json は null として出力する)
-- **パイプの早期終了は panic させない**: `| head` / `| less` 等で読み手が先に降りた場合、unix では SIGPIPE の既定動作でそのまま終了する(exit 101 の panic にしない)。パイプライン全体の exit code は後段コマンドのもの(`| head` なら 0)。SIGPIPE を持たない Windows は対象外
+- **パイプの早期終了は panic させない**: `| head` / `| less` 等で読み手が先に降りた場合、unix では SIGPIPE の既定動作でそのまま終了する(exit 101 の panic にしない)。パイプライン全体の exit code は後段コマンドのもの(`| head` なら 0)。ただし `set -o pipefail` 下では mikke 側の SIGPIPE 終了が拾われて 141(128+13)になる。SIGPIPE を持たない Windows は対象外
 - 内部エラーによる panic 終了(Rust 既定 101)は「非 0 だが値は保証外」
 
 ## 設定スキーマ (`mikke.toml`、全キー省略可)
