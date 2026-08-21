@@ -360,6 +360,138 @@ fn exclude_name_matches_at_any_depth() {
     );
 }
 
+// --- [index] auto_rebuild ---
+
+/// mtime を未来へ明示的に進める (index 生成時刻との前後関係を時刻粒度に依存させず flaky を防ぐ)。
+fn bump_mtime(path: &Path, secs_ahead: u64) {
+    let f = fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(secs_ahead))
+        .unwrap();
+}
+
+/// auto_rebuild 有効時: 編集後の find が新内容を返し、告知は stderr のみ (stdout に混ぜない)。
+#[test]
+fn auto_rebuild_reflects_edit() {
+    let root = temp_repo(
+        "arb-edit",
+        &[
+            ("mikke.toml", "[index]\nauto_rebuild = true\n"),
+            ("a.md", "# A\n\nquokka のメモ。\n"),
+        ],
+    );
+    run(&root, &["index"]);
+    // 未変更なら再構築は走らない
+    let (stdout, stderr) = run(&root, &["find", "quokka"]);
+    assert!(stdout.contains("a.md"), "初回検索でヒットしない:\n{stdout}");
+    assert!(
+        !stderr.contains("再構築"),
+        "未変更なのに再構築された:\n{stderr}"
+    );
+    // 編集して mtime を index 生成時刻より確実に新しくする
+    fs::write(root.join("a.md"), "# A\n\nwalrus のメモ。\n").unwrap();
+    bump_mtime(&root.join("a.md"), 10);
+    let (stdout, stderr) = run(&root, &["find", "walrus"]);
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        stdout.contains("a.md"),
+        "編集が検索に反映されていない:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stderr.contains("再構築"),
+        "再構築の告知が stderr に無い:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("再構築"),
+        "再構築の告知が stdout に混ざっている:\n{stdout}"
+    );
+}
+
+/// auto_rebuild 有効時: mtime が保存されるリネームと削除も path 集合の変化で検知する。
+#[test]
+fn auto_rebuild_detects_rename_and_delete() {
+    let root = temp_repo(
+        "arb-move",
+        &[
+            ("mikke.toml", "[index]\nauto_rebuild = true\n"),
+            ("a.md", "# A\n\nquokka のメモ。\n"),
+            ("b.md", "# B\n\nquokka の別メモ。\n"),
+        ],
+    );
+    run(&root, &["index"]);
+    // rename は mtime を保存し、削除は mtime 判定では拾えない — path 集合比較の担当領域
+    fs::rename(root.join("a.md"), root.join("c.md")).unwrap();
+    fs::remove_file(root.join("b.md")).unwrap();
+    let (stdout, stderr) = run(&root, &["find", "quokka"]);
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        stdout.contains("c.md"),
+        "リネームが検索に反映されていない:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("a.md") && !stdout.contains("b.md"),
+        "旧 path が結果に残っている:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("再構築"),
+        "再構築の告知が stderr に無い:\n{stderr}"
+    );
+}
+
+/// auto_rebuild 有効でも health は再構築せず、index 鮮度の診断がマスクされない。
+#[test]
+fn auto_rebuild_does_not_mask_health() {
+    let root = temp_repo(
+        "arb-health",
+        &[
+            ("mikke.toml", "[index]\nauto_rebuild = true\n"),
+            ("a.md", "# A\n\nquokka のメモ。\n"),
+        ],
+    );
+    run(&root, &["index"]);
+    fs::write(root.join("a.md"), "# A\n\nwalrus のメモ。\n").unwrap();
+    bump_mtime(&root.join("a.md"), 10);
+    let (stdout, stderr) = run(&root, &["health"]);
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        stdout.contains("[index鮮度]"),
+        "stale なのに index 鮮度の診断が出ない (health が再構築している?):\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("再構築しています"),
+        "health で自動再構築が走っている:\n{stderr}"
+    );
+}
+
+/// 既定 (auto_rebuild 無指定 = false) では従来どおり古い index の結果を返し、再構築しない。
+#[test]
+fn auto_rebuild_default_off_keeps_old_index() {
+    let root = temp_repo(
+        "arb-off",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            ("a.md", "# A\n\nquokka のメモ。\n"),
+        ],
+    );
+    run(&root, &["index"]);
+    fs::write(root.join("a.md"), "# A\n\nwalrus のメモ。\n").unwrap();
+    bump_mtime(&root.join("a.md"), 10);
+    let (old_hit, _) = run(&root, &["find", "quokka"]);
+    let (new_hit, stderr) = run(&root, &["find", "walrus"]);
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        old_hit.contains("a.md"),
+        "既定で古い index の結果が返らない (勝手に再構築された?):\n{old_hit}"
+    );
+    assert!(
+        new_hit.contains("(0件"),
+        "既定なのに新内容が反映されている:\n{new_hit}"
+    );
+    assert!(
+        !stderr.contains("再構築"),
+        "既定なのに再構築の告知が出ている:\n{stderr}"
+    );
+}
+
 // --- version (slim/full 判別) ---
 
 /// --version は subcommand 探索より前に判定され、slim ビルドでは従来通りの表記のまま。

@@ -72,6 +72,7 @@ pub struct Config {
     // [index]
     pub index_rel: String,
     pub embeddings_rel: String,
+    pub auto_rebuild: bool,
     // [semantic]
     pub semantic_enabled: bool,
     pub model: String,
@@ -105,6 +106,7 @@ impl Config {
                 .collect(),
             index_rel: DEFAULT_INDEX_PATH.to_string(),
             embeddings_rel: DEFAULT_EMBEDDINGS_DIR.to_string(),
+            auto_rebuild: false,
             semantic_enabled: false,
             model: DEFAULT_MODEL.to_string(),
             query_prefix: "query: ".to_string(),
@@ -330,6 +332,7 @@ pub fn load_config(root: PathBuf) -> Config {
         let index = get_table(p, &data, "index");
         cfg.index_rel = scalar_str(p, &index, "index", "path", cfg.index_rel);
         cfg.embeddings_rel = scalar_str(p, &index, "index", "embeddings_dir", cfg.embeddings_rel);
+        cfg.auto_rebuild = scalar_bool(p, &index, "index", "auto_rebuild", cfg.auto_rebuild);
 
         let semantic = get_table(p, &data, "semantic");
         cfg.semantic_enabled =

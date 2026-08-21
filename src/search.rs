@@ -80,8 +80,7 @@ fn print_json<T: serde::Serialize>(value: &T) {
     }
 }
 
-pub fn connect(cfg: &Config) -> Connection {
-    index::ensure_index(cfg);
+fn open_index(cfg: &Config) -> Connection {
     match Connection::open(cfg.index_path()) {
         Ok(c) => c,
         Err(e) => {
@@ -89,6 +88,19 @@ pub fn connect(cfg: &Config) -> Connection {
             std::process::exit(2);
         }
     }
+}
+
+/// 検索系コマンド用の接続。auto_rebuild 有効なら stale 時に全再構築してから開く。
+pub fn connect(cfg: &Config) -> Connection {
+    index::ensure_index(cfg);
+    open_index(cfg)
+}
+
+/// health 用の接続。auto_rebuild の鮮度判定を通さない
+/// (再構築すると health の index 鮮度診断がマスクされるため)。
+pub fn connect_no_rebuild(cfg: &Config) -> Connection {
+    index::ensure_index_exists(cfg);
+    open_index(cfg)
 }
 
 /// path のリストに対応する notes 行を取得 (path 順序を保持)。
