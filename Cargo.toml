@@ -1,6 +1,6 @@
 [package]
 name = "mikke"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Markdown ノート検索 CLI — SQLite FTS5 (trigram, 日本語対応) BM25 + optional ローカル embedding hybrid"
 license = "MIT"
