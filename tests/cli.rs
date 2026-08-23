@@ -957,6 +957,87 @@ fn index_check_exit_codes() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// tags のコメントだけの要素・空文字列・重複を安全に扱い、各 CLI の契約を保つ。
+#[test]
+fn empty_and_duplicate_tags_are_reported_without_panicking() {
+    let root = temp_repo(
+        "empty-tags",
+        &[
+            ("mikke.toml", "[health]\nmin_words = 0\n"),
+            (
+                "notes/mixed.md",
+                "---\ntitle: Mixed\nsummary: test\nupdated: 2026-08-23\ntags:\n  - #Dog\n  - valid\n  - #Cat\n  - valid\n  - \"#Dog\"\n  - \"\"\n  - other\n---\n\nbody\n",
+            ),
+            (
+                "notes/duplicate.md",
+                "---\ntitle: Duplicate\nsummary: test\nupdated: 2026-08-23\ntags: [alpha, beta, alpha]\n---\n\nbody\n",
+            ),
+        ],
+    );
+
+    let index = run_raw(&root, &["index"]);
+    let index_stdout = String::from_utf8_lossy(&index.stdout);
+    let index_stderr = String::from_utf8_lossy(&index.stderr);
+    assert!(index.status.success(), "通常 index が失敗:\n{index_stderr}");
+    assert!(
+        index_stdout.contains("ノート数: 2"),
+        "index が完走していない:\n{index_stdout}"
+    );
+    assert!(
+        index_stderr.contains("notes/mixed.md"),
+        "警告に path が無い:\n{index_stderr}"
+    );
+    assert!(
+        index_stderr.contains("`- Dog` に修正"),
+        "修正方法が無い:\n{index_stderr}"
+    );
+    assert!(
+        !index_stderr.contains("notes/duplicate.md"),
+        "重複だけを警告している:\n{index_stderr}"
+    );
+
+    let (quoted, quoted_stderr) = run(&root, &["tag", "#Dog"]);
+    assert!(
+        quoted.contains("notes/mixed.md"),
+        "引用された #Dog が登録されていない:\n{quoted}\n{quoted_stderr}"
+    );
+    let (valid, _) = run(&root, &["tag", "valid"]);
+    assert_eq!(
+        valid.matches("notes/mixed.md").count(),
+        1,
+        "重複タグが残っている:\n{valid}"
+    );
+
+    let health = run_raw(&root, &["health"]);
+    let health_stdout = String::from_utf8_lossy(&health.stdout);
+    assert!(health.status.success(), "health が非 0:\n{health_stdout}");
+    assert!(
+        health_stdout.contains("[tags の空要素 (1ファイル)]"),
+        "health が問題を報告しない:\n{health_stdout}"
+    );
+    assert!(
+        health_stdout.contains("notes/mixed.md"),
+        "health に path が無い:\n{health_stdout}"
+    );
+    assert!(
+        health_stdout.contains("`- Dog` に修正"),
+        "health に修正方法が無い:\n{health_stdout}"
+    );
+
+    let check = run_raw(&root, &["index", "--check"]);
+    let check_stderr = String::from_utf8_lossy(&check.stderr);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        check.status.code(),
+        Some(1),
+        "index --check が exit 1 でない:\n{check_stderr}"
+    );
+    assert!(
+        check_stderr.contains("tags の空要素: 1ファイル"),
+        "--check の検出結果が無い:\n{check_stderr}"
+    );
+}
+
 /// 設定の型エラーは検索系でもエラーとして exit 2 (0 件の 1 と区別する)。
 #[test]
 fn config_error_exit_code() {

@@ -37,7 +37,7 @@ struct Cli {
 enum Command {
     /// index を全再構築する
     Index {
-        /// frontmatter 破損があれば非 0 で終了 (CI 用)
+        /// frontmatter 破損や tags 空要素があれば非 0 で終了 (CI 用)
         #[arg(long)]
         check: bool,
     },

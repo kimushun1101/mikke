@@ -24,6 +24,18 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Default)]
+pub struct BuildIssues {
+    frontmatter: Vec<(String, String, String)>,
+    empty_tags: Vec<(String, usize)>,
+}
+
+impl BuildIssues {
+    fn count(&self) -> usize {
+        self.frontmatter.len() + self.empty_tags.len()
+    }
+}
+
 const SCHEMA: &str = "
     DROP TABLE IF EXISTS notes_fts;
     DROP TABLE IF EXISTS links;
@@ -99,9 +111,9 @@ fn emit(use_stderr: bool, line: &str) {
     }
 }
 
-/// index を全再構築し、frontmatter 破損リスト (path, 種別, 詳細) を返す。
+/// index を全再構築し、frontmatter 破損と tags 空要素の検出結果を返す。
 /// use_stderr=true で進捗出力を stderr へ (auto-build 時に stdout を汚さない)。
-pub fn build_to(cfg: &Config, use_stderr: bool) -> Vec<(String, String, String)> {
+pub fn build_to(cfg: &Config, use_stderr: bool) -> BuildIssues {
     let index_path = cfg.index_path();
     if let Some(parent) = index_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -115,7 +127,7 @@ pub fn build_to(cfg: &Config, use_stderr: bool) -> Vec<(String, String, String)>
 
     let mut note_count = 0i64;
     let mut tag_set: HashSet<String> = HashSet::new();
-    let mut issues: Vec<(String, String, String)> = Vec::new();
+    let mut issues = BuildIssues::default();
     // スナップショットは走査した全 path (frontmatter 破損で notes から除外される分も含む)。
     // notes 行数と違い破損ファイルの有無で恒常 stale 化しない。
     let mut scanned_paths: Vec<String> = Vec::new();
@@ -125,7 +137,7 @@ pub fn build_to(cfg: &Config, use_stderr: bool) -> Vec<(String, String, String)>
         scanned_paths.push(rel_posix.clone());
         if let Some((kind, detail)) = scan::scan_frontmatter_issue(&md_file) {
             eprintln!("Warning: {rel_posix}: frontmatter {kind} — {detail}");
-            issues.push((rel_posix.clone(), kind, detail));
+            issues.frontmatter.push((rel_posix.clone(), kind, detail));
         }
         let note = match scan::load_note(&md_file, &rel) {
             Some(n) => n,
@@ -134,6 +146,15 @@ pub fn build_to(cfg: &Config, use_stderr: bool) -> Vec<(String, String, String)>
                 continue;
             }
         };
+        if note.empty_tag_count > 0 {
+            eprintln!(
+                "Warning: {rel_posix}: tags に空要素が{}件あります (`- #Dog` は YAML では空要素です。`- Dog` に修正してください)",
+                note.empty_tag_count
+            );
+            issues
+                .empty_tags
+                .push((rel_posix.clone(), note.empty_tag_count));
+        }
 
         conn.execute(
             "INSERT INTO notes (path, title, date, updated, summary, word_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -193,31 +214,43 @@ pub fn build_to(cfg: &Config, use_stderr: bool) -> Vec<(String, String, String)>
     emit(use_stderr, &format!("  ノート数: {note_count}"));
     emit(use_stderr, &format!("  タグ数: {}", tag_set.len()));
     // silent skip の可視化: 破損は握り潰さず必ず件数を出す (0 件でも明示)
-    if issues.is_empty() {
+    if issues.frontmatter.is_empty() {
         emit(use_stderr, "  frontmatter 破損: 0件");
     } else {
         emit(
             use_stderr,
             &format!(
                 "  ⚠ frontmatter 破損: {}件 (詳細は上の Warning / mikke health)",
-                issues.len()
+                issues.frontmatter.len()
+            ),
+        );
+    }
+    if !issues.empty_tags.is_empty() {
+        let elements: usize = issues.empty_tags.iter().map(|(_, count)| count).sum();
+        emit(
+            use_stderr,
+            &format!(
+                "  ⚠ tags の空要素: {elements}件 ({}ファイル、詳細は上の Warning / mikke health)",
+                issues.empty_tags.len()
             ),
         );
     }
     issues
 }
 
-/// index を全再構築し、frontmatter 破損リスト (path, 種別, 詳細) を返す。
-pub fn build(cfg: &Config) -> Vec<(String, String, String)> {
+/// index を全再構築し、frontmatter 破損と tags 空要素の検出結果を返す。
+pub fn build(cfg: &Config) -> BuildIssues {
     build_to(cfg, false)
 }
 
 pub fn cmd_index(cfg: &Config, check: bool) {
     let issues = build(cfg);
-    if check && !issues.is_empty() {
+    if check && issues.count() > 0 {
         eprintln!(
-            "Error: frontmatter 破損 {}件 (--check 指定のため非 0 で終了)",
-            issues.len()
+            "Error: 修正対象 {}件 (frontmatter 破損: {}件、tags の空要素: {}ファイル; --check 指定のため非 0 で終了)",
+            issues.count(),
+            issues.frontmatter.len(),
+            issues.empty_tags.len()
         );
         // 「検出 = 結果」なので 1 (構築自体の失敗 = 2 と区別 — docs/SPEC.md「exit code」)
         std::process::exit(1);
