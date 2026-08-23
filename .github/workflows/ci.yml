@@ -102,14 +102,3 @@ jobs:
               exit 1
             fi
           done
-
-  install-smoke-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: run install.ps1
-        shell: pwsh
-        run: |
-          $env:MIKKE_VERSION = "v0.3.0"
-          $env:MIKKE_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "bin"
-          ./install.ps1

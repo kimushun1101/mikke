@@ -1,4 +1,4 @@
-#Requires -Version 5
+﻿#Requires -Version 5
 # mikke の Windows 用インストールスクリプト。Releases から zip を取得し、
 # SHA256SUMS で検証してから配置する。
 #
@@ -8,6 +8,7 @@
 #   $env:MIKKE_VARIANT     = "slim"      # full (既定) / slim
 #   $env:MIKKE_VERSION     = "v0.2.0"    # 既定: latest
 #   $env:MIKKE_INSTALL_DIR = "C:/tools"  # 既定: $env:LOCALAPPDATA/Programs/mikke
+# Windows target は 1 種類のみのため MIKKE_TARGET は提供しない。
 #
 # Linux / macOS は install.sh を使う。
 
@@ -19,7 +20,41 @@ $Version = if ($env:MIKKE_VERSION) { $env:MIKKE_VERSION } else { "latest" }
 $InstallDir = if ($env:MIKKE_INSTALL_DIR) { $env:MIKKE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\mikke" }
 
 if (@("slim", "full") -notcontains $Variant) { throw "MIKKE_VARIANT は slim か full (指定値: $Variant)" }
-if ($Version -match "^[0-9]") { $Version = "v$Version" }
+if ($Version -cmatch "^[0-9]+\.[0-9]+\.[0-9]+$") { $Version = "v$Version" }
+if ($Version -cne "latest" -and $Version -cnotmatch "^v[0-9]+\.[0-9]+\.[0-9]+$") {
+    throw "MIKKE_VERSION は latest か v<major>.<minor>.<patch> (指定値: $Version)"
+}
+
+function Invoke-WithoutProgress {
+    param([scriptblock]$Request)
+
+    $PreviousProgressPreference = $ProgressPreference
+    try {
+        $ProgressPreference = "SilentlyContinue"
+        & $Request
+    }
+    finally {
+        $ProgressPreference = $PreviousProgressPreference
+    }
+}
+
+function ConvertTo-NormalizedPath {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    try {
+        $FullPath = [System.IO.Path]::GetFullPath($Path)
+        $Root = [System.IO.Path]::GetPathRoot($FullPath)
+        if ($FullPath.Length -gt $Root.Length) { $FullPath = $FullPath.TrimEnd("\", "/") }
+        return $FullPath
+    }
+    catch {
+        return $null
+    }
+}
+
+$InstallDir = ConvertTo-NormalizedPath $InstallDir
+if (-not $InstallDir) { throw "MIKKE_INSTALL_DIR が不正 (指定値: $env:MIKKE_INSTALL_DIR)" }
 
 # arch 判定 (Windows 向けは x86_64 のみ配布)。32-bit PowerShell からでも WOW64 環境変数で 64-bit OS を判定する
 $Arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
@@ -30,9 +65,11 @@ $Target = "x86_64-pc-windows-msvc"
 $Archive = "mikke-$Variant-$Target.zip"
 
 # latest はタグ名に解決してから使う (取得の合間に新 release が出ても世代がずれないように)
-if ($Version -eq "latest") {
-    $Version = (Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest").tag_name
-    if ($Version -notmatch "^v[0-9]") { throw "latest バージョンの解決に失敗 (取得値: $Version)" }
+if ($Version -ceq "latest") {
+    $Version = (Invoke-WithoutProgress { Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest" }).tag_name
+    if ($Version -cnotmatch "^v[0-9]+\.[0-9]+\.[0-9]+$") {
+        throw "latest バージョンの解決に失敗 (取得値: $Version)"
+    }
 }
 $Base = "https://github.com/$Repo/releases/download/$Version"
 
@@ -40,8 +77,10 @@ $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("mikke-install-" + [System.I
 New-Item -ItemType Directory -Path $Tmp | Out-Null
 try {
     Write-Host "download: $Base/$Archive"
-    Invoke-WebRequest -Uri "$Base/$Archive" -OutFile (Join-Path $Tmp $Archive) -UseBasicParsing
-    Invoke-WebRequest -Uri "$Base/SHA256SUMS" -OutFile (Join-Path $Tmp "SHA256SUMS") -UseBasicParsing
+    Invoke-WithoutProgress {
+        Invoke-WebRequest -Uri "$Base/$Archive" -OutFile (Join-Path $Tmp $Archive) -UseBasicParsing
+        Invoke-WebRequest -Uri "$Base/SHA256SUMS" -OutFile (Join-Path $Tmp "SHA256SUMS") -UseBasicParsing
+    }
 
     # checksum 検証 (ファイル名はフィールド完全一致で照合、"*" 付きのバイナリモード形式も許容)
     $Line = Get-Content (Join-Path $Tmp "SHA256SUMS") | Where-Object {
@@ -72,7 +111,15 @@ try {
 
     # PATH 確認 (現在のセッションとユーザー環境変数のどちらにも無ければ案内)
     $Paths = ($env:Path -split ";") + ([Environment]::GetEnvironmentVariable("Path", "User") -split ";")
-    if ($Paths -notcontains $InstallDir) {
+    $PathContainsInstallDir = $false
+    foreach ($PathEntry in $Paths) {
+        $NormalizedPathEntry = ConvertTo-NormalizedPath $PathEntry
+        if ($NormalizedPathEntry -and [StringComparer]::OrdinalIgnoreCase.Equals($NormalizedPathEntry, $InstallDir)) {
+            $PathContainsInstallDir = $true
+            break
+        }
+    }
+    if (-not $PathContainsInstallDir) {
         Write-Host "note: $InstallDir に PATH が通っていない。次で追加できる (新しいターミナルから有効):"
         Write-Host "  [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';' + '$InstallDir', 'User')"
     }
