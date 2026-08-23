@@ -19,7 +19,7 @@ use crate::config::{
     HEALTH_CHECK_TAGS, HEALTH_CHECK_UPDATED,
 };
 use crate::index::mtime_epoch_secs;
-use crate::scan::{iter_notes, scan_frontmatter_issue};
+use crate::scan::{iter_notes, load_note, scan_frontmatter_issue};
 use crate::search;
 use rusqlite::{params, Connection};
 use std::path::{Component, Path, PathBuf};
@@ -105,6 +105,7 @@ pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
         .ok()
         .and_then(|v| v.parse::<f64>().ok());
     let mut broken: Vec<(String, String, String)> = Vec::new();
+    let mut empty_tags: Vec<(String, usize)> = Vec::new();
     let mut stale_files = 0usize;
     // frontmatter を disable しても走査ループ自体は index 鮮度カウントのため残す
     let fm_enabled = !cfg.health_disabled(HEALTH_CHECK_FRONTMATTER);
@@ -115,7 +116,13 @@ pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
         }
         if fm_enabled {
             if let Some((kind, detail)) = scan_frontmatter_issue(&md_file) {
-                broken.push((rel_posix, kind, detail));
+                broken.push((rel_posix.clone(), kind, detail));
+            }
+        }
+        if !cfg.health_disabled(HEALTH_CHECK_TAGS) && !skip(&rel_posix, &cfg.quality_skip_prefixes)
+        {
+            if let Some(note) = load_note(&md_file, &rel).filter(|note| note.empty_tag_count > 0) {
+                empty_tags.push((rel_posix.clone(), note.empty_tag_count));
             }
         }
         if let Some(gen) = gen_ts {
@@ -214,6 +221,20 @@ pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
             broken
                 .iter()
                 .map(|(p, kind, detail)| (p.clone(), format!("  -- {kind}: {detail}")))
+                .collect(),
+        ));
+    }
+    if !empty_tags.is_empty() {
+        sections.push((
+            format!("tags の空要素 ({}ファイル)", empty_tags.len()),
+            empty_tags
+                .iter()
+                .map(|(p, count)| {
+                    (
+                        p.clone(),
+                        format!("  -- {count}件 (`- #Dog` は YAML では空要素。`- Dog` に修正)"),
+                    )
+                })
                 .collect(),
         ));
     }

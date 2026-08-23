@@ -15,6 +15,8 @@ pub struct Note {
     pub path_rel: String, // root 相対 posix パス
     pub title: String,
     pub tags: Vec<String>,
+    /// YAML の null / 空文字列だった tags 要素数。index/health で修正箇所を報告する。
+    pub empty_tag_count: usize,
     pub date: String, // YYYY-MM-DD 正規化済 (無ければ "")
     pub updated: String,
     pub summary: String,
@@ -100,6 +102,25 @@ fn yaml_scalar_string(v: &Value) -> String {
             .map(|s| s.trim_end().to_string())
             .unwrap_or_default(),
     }
+}
+
+/// tags の sequence を YAML の解釈どおりに文字列化する。
+/// null / 空文字列は登録せず、有効な値は最初の出現順を保って重複除去する。
+fn parse_tags(seq: &[Value]) -> (Vec<String>, usize) {
+    let mut seen = HashSet::new();
+    let mut tags = Vec::new();
+    let mut empty_count = 0;
+    for value in seq {
+        if matches!(value, Value::Null) || matches!(value, Value::String(s) if s.is_empty()) {
+            empty_count += 1;
+            continue;
+        }
+        let tag = yaml_scalar_string(value);
+        if seen.insert(tag.clone()) {
+            tags.push(tag);
+        }
+    }
+    (tags, empty_count)
 }
 
 /// date/updated を `YYYY-MM-DD` 文字列へ正規化。空は ""。
@@ -279,11 +300,20 @@ pub fn load_note(abs: &Path, rel: &Path) -> Option<Note> {
         .map(yaml_scalar_string);
     let title = extract_title(fm_title.as_deref(), &content, abs);
 
-    let tags: Vec<String> = match meta_get(&metadata, "tags") {
-        Some(Value::Sequence(seq)) => seq.iter().map(yaml_scalar_string).collect(),
+    let (tags, empty_tag_count) = match meta_get(&metadata, "tags") {
+        Some(Value::Sequence(seq)) => parse_tags(seq),
         // tags を文字列で書くと 1 文字ずつ分解される (歴史的 quirk。変えるなら golden ごと意図的に)
-        Some(Value::String(s)) => s.chars().map(String::from).collect(),
-        _ => Vec::new(),
+        Some(Value::String(s)) => {
+            let mut seen = HashSet::new();
+            (
+                s.chars()
+                    .map(String::from)
+                    .filter(|tag| seen.insert(tag.clone()))
+                    .collect(),
+                0,
+            )
+        }
+        _ => (Vec::new(), 0),
     };
     let date = normalize_date(meta_get(&metadata, "date"));
     let updated = normalize_date(meta_get(&metadata, "updated"));
@@ -296,6 +326,7 @@ pub fn load_note(abs: &Path, rel: &Path) -> Option<Note> {
         path_rel: to_posix(rel),
         title,
         tags,
+        empty_tag_count,
         date,
         updated,
         summary,
@@ -352,4 +383,25 @@ pub fn read_utf8_sig(path: &Path) -> std::io::Result<String> {
     Ok(s.strip_prefix('\u{feff}')
         .map(|x| x.to_string())
         .unwrap_or(s))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_tags;
+    use serde_yaml_ng::Value;
+
+    #[test]
+    fn tags_drop_empty_and_deduplicate_in_input_order() {
+        let value: Value = serde_yaml_ng::from_str(
+            "- #Dog\n- valid\n- #Cat\n- valid\n- \"#Dog\"\n- \"\"\n- other\n",
+        )
+        .unwrap();
+        let Value::Sequence(seq) = value else {
+            panic!("sequence ではない");
+        };
+
+        let (tags, empty_count) = parse_tags(&seq);
+        assert_eq!(tags, ["valid", "#Dog", "other"]);
+        assert_eq!(empty_count, 3);
+    }
 }
