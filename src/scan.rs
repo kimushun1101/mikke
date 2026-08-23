@@ -334,27 +334,6 @@ pub fn load_note(abs: &Path, rel: &Path) -> Option<Note> {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_tags;
-    use serde_yaml_ng::Value;
-
-    #[test]
-    fn tags_drop_empty_and_deduplicate_in_input_order() {
-        let value: Value = serde_yaml_ng::from_str(
-            "- #Dog\n- valid\n- #Cat\n- valid\n- \"#Dog\"\n- \"\"\n- other\n",
-        )
-        .unwrap();
-        let Value::Sequence(seq) = value else {
-            panic!("sequence ではない");
-        };
-
-        let (tags, empty_count) = parse_tags(&seq);
-        assert_eq!(tags, ["valid", "#Dog", "other"]);
-        assert_eq!(empty_count, 3);
-    }
-}
-
 /// frontmatter の silent 破損検知。問題なければ None、あれば (種別, 詳細)。
 pub fn scan_frontmatter_issue(path: &Path) -> Option<(String, String)> {
     let text = match read_utf8_sig(path) {
@@ -404,4 +383,25 @@ pub fn read_utf8_sig(path: &Path) -> std::io::Result<String> {
     Ok(s.strip_prefix('\u{feff}')
         .map(|x| x.to_string())
         .unwrap_or(s))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_tags;
+    use serde_yaml_ng::Value;
+
+    #[test]
+    fn tags_drop_empty_and_deduplicate_in_input_order() {
+        let value: Value = serde_yaml_ng::from_str(
+            "- #Dog\n- valid\n- #Cat\n- valid\n- \"#Dog\"\n- \"\"\n- other\n",
+        )
+        .unwrap();
+        let Value::Sequence(seq) = value else {
+            panic!("sequence ではない");
+        };
+
+        let (tags, empty_count) = parse_tags(&seq);
+        assert_eq!(tags, ["valid", "#Dog", "other"]);
+        assert_eq!(empty_count, 3);
+    }
 }

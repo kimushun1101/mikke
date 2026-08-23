@@ -880,6 +880,46 @@ fn index_check_ignores_frontmatter_disable() {
     );
 }
 
+/// disable = ["tags"] は health の空要素報告だけを止め、
+/// index --check の空要素検出 (非 0 終了) はゲートしない。
+#[test]
+fn index_check_ignores_tags_disable() {
+    let root = temp_repo(
+        "health-disable-tags-check",
+        &[
+            ("mikke.toml", "[health]\ndisable = [\"tags\"]\n"),
+            // issue #37 の最小再現: コメントだけの null 要素が 2 つ
+            (
+                "notes/hashtag.md",
+                "---\ntitle: Hashtag\ntags:\n  - #Dog\n  - #Cat\n---\n\nbody\n",
+            ),
+        ],
+    );
+    run(&root, &["index"]);
+    let health = run_raw(&root, &["health"]);
+    let health_stdout = String::from_utf8_lossy(&health.stdout).into_owned();
+    let check = run_raw(&root, &["index", "--check"]);
+    let check_stderr = String::from_utf8_lossy(&check.stderr).into_owned();
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        health.status.success(),
+        "health が非 0 で終了した:\n{health_stdout}"
+    );
+    assert!(
+        !health_stdout.contains("tags の空要素"),
+        "disable しても health が空要素を報告している:\n{health_stdout}"
+    );
+    assert_eq!(
+        check.status.code(),
+        Some(1),
+        "空要素があるのに index --check が exit 1 でない:\n{check_stderr}"
+    );
+    assert!(
+        check_stderr.contains("tags の空要素"),
+        "index --check の空要素エラーメッセージが無い:\n{check_stderr}"
+    );
+}
+
 // --- exit code (grep 慣習: ヒット=0 / 0件=1 / エラー=2 — docs/SPEC.md「exit code」) ---
 
 /// 検索系はヒットで 0、0 件で 1。一覧系 (list-tags / recent) は 0 件も正常で 0。
@@ -972,6 +1012,12 @@ fn empty_and_duplicate_tags_are_reported_without_panicking() {
                 "notes/duplicate.md",
                 "---\ntitle: Duplicate\nsummary: test\nupdated: 2026-08-23\ntags: [alpha, beta, alpha]\n---\n\nbody\n",
             ),
+            // 文字列 tags は 1 文字ずつ分解される歴史的 quirk。重複文字 (a) は
+            // 重複除去が無いと tags PK 違反で panic する (issue #37 と同一機構)
+            (
+                "notes/string-quirk.md",
+                "---\ntitle: String quirk\nsummary: test\nupdated: 2026-08-23\ntags: aba\n---\n\nbody\n",
+            ),
         ],
     );
 
@@ -980,7 +1026,7 @@ fn empty_and_duplicate_tags_are_reported_without_panicking() {
     let index_stderr = String::from_utf8_lossy(&index.stderr);
     assert!(index.status.success(), "通常 index が失敗:\n{index_stderr}");
     assert!(
-        index_stdout.contains("ノート数: 2"),
+        index_stdout.contains("ノート数: 3"),
         "index が完走していない:\n{index_stdout}"
     );
     assert!(
@@ -992,7 +1038,8 @@ fn empty_and_duplicate_tags_are_reported_without_panicking() {
         "修正方法が無い:\n{index_stderr}"
     );
     assert!(
-        !index_stderr.contains("notes/duplicate.md"),
+        !index_stderr.contains("notes/duplicate.md")
+            && !index_stderr.contains("notes/string-quirk.md"),
         "重複だけを警告している:\n{index_stderr}"
     );
 
@@ -1006,6 +1053,12 @@ fn empty_and_duplicate_tags_are_reported_without_panicking() {
         valid.matches("notes/mixed.md").count(),
         1,
         "重複タグが残っている:\n{valid}"
+    );
+    let (chars, _) = run(&root, &["tag", "a"]);
+    assert_eq!(
+        chars.matches("notes/string-quirk.md").count(),
+        1,
+        "文字列 tags の重複文字が残っている:\n{chars}"
     );
 
     let health = run_raw(&root, &["health"]);

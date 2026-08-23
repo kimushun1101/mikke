@@ -95,7 +95,7 @@ disable = []                           # 項目単位で無効化するチェッ
 ## ノートの解釈
 
 - **title 抽出優先順**: frontmatter `title` → 最初の `# ` 見出し → ファイル名 stem。
-- **tags**: YAML sequence の null / 空文字列要素は登録しない。特に `- #Dog` は YAML ではコメントだけの null 要素であり、`Dog` へ復元しない (`- Dog` が修正例)。`- "#Dog"` は有効な文字列としてそのまま登録する。有効な重複タグは最初の出現順を保って重複除去する。空要素は通常の `index` で path 付き警告、`health` で修正対象として報告し、`index --check` は構築完了後に exit 1 とする。
+- **tags**: YAML sequence の null / 空文字列要素は登録しない。特に `- #Dog` は YAML ではコメントだけの null 要素であり、`Dog` へ復元しない (`- Dog` が修正例)。`- "#Dog"` は有効な文字列としてそのまま登録する。有効な重複タグは最初の出現順を保って重複除去する (tags を文字列で書いた場合の 1 文字分解 quirk にも同じ重複除去を適用)。空要素は通常の `index` で path 付き警告、`health` で修正対象として報告し、`index --check` は構築完了後に exit 1 とする。
 - **date 正規化**: date/updated は `YYYY-MM-DD` 文字列へ。YAML が date 型で解釈した場合も文字列化して揃える。
 - **wikilink 抽出**: `\[\[([^\]|]+?)(?:\|[^\]]+?)?\]\]`、set 化して sorted。
 - **語数カウント (word_count)**: `[　-鿿豈-﫿ｦ-ﾟ]` の CJK 文字数 + `[a-zA-Z0-9]+` の語数。文字クラスの範囲は**エスケープ表記で**書く(生リテラルは Unicode NFC 正規化で別文字に化ける)。health の低ボリューム判定の基準値。
@@ -195,7 +195,7 @@ score/via は semantic/hybrid のみ。**summary 欠落を空白で黙らせな�
 
 - **frontmatter 破損**: index 非依存で filesystem を直接スキャン(古い index に騙されない)。判定: 先頭が `---` で始まるのに閉じ `---` が無い → 「閉じ---欠落」。YAML パース失敗 → 「YAMLエラー」。読込不可 → その旨。先頭 `---` 無しは破損ではない(タグ/要約欠落として別途拾う)。
 - **実行bit欠落**: `exec_bit_prefixes` 配下の tracked `*.sh` の git index mode が `100755` でないものを検出。`git -C root -c core.quotepath=off ls-files -s -- <prefixes>` を UTF-8 で読む(後述の encoding 注意)。index(tree) 依存でホスト非依存 → レポートに含めて commit 経由通知に乗せる。
-- **品質チェック**: tags の YAML null / 空文字列要素は filesystem から検出し、タグなし / 要約なし / `word_count < min_words` / updated 未設定は index ベースで検出する。各々 `quality_skip_prefixes` を適用。
+- **品質チェック**: tags の YAML null / 空文字列要素は filesystem から検出し、タグなし / 要約なし / `word_count < min_words` / updated 未設定は index ベースで検出する。各々 `quality_skip_prefixes` を適用。filesystem 検出の tags 空要素は frontmatter 破損スキャンと同じ走査に乗るため `scan_skip_prefixes` も併せて効く (index build の警告と `index --check` の非 0 終了はどちらの prefix にも影響されない)。
 - **チェックの無効化(`disable`)**: `[health] disable` に挙げたチェック名を項目単位でスキップする(既定は空 = 全チェック有効)。許容名は `frontmatter` / `tags` / `summary` / `low_words` / `updated` の 5 種(完全一致・大文字小文字を区別)。未知名は「設定読み込みの厳格さ」に従い即エラー終了する(typo を silent no-op にしない)。効くのは health コマンドのみで、`mikke index --check` の非 0 終了や index build 時の警告は変わらない(CI 併用時の混乱防止)。実行bit欠落は `exec_bit_prefixes` による opt-in、index 鮮度は情報表示のため対象外。
 - **index 鮮度**: `meta['generated']` より mtime が新しい md の件数。実行時依存なので **stdout のみ**、md レポートには含めない(レポートの差分 = 実質的状態変化、にするため)。`auto_rebuild` 有効でも health は再構築しない(「index スキーマ」参照)。
 - **md レポート (`--md-report`)**: 揮発情報(実行時刻・鮮度)を含めず決定的に生成 → 「内容が変わった時だけ commit」運用。改行は **LF 固定**(Windows CRLF と Linux nightly LF で差分が出て決定性が壊れるのを防ぐ)。パスはレポート置き場からの相対 md リンク(`#` は %23、空白/括弧は `<>` wrap、`[]` はエスケープ、基底名衝突回避のため wikilink でなくパスリンク)。
