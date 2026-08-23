@@ -109,10 +109,9 @@ if [ "$VERSION" = "latest" ]; then
   latest_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest") || rc=$?
   [ "$rc" -eq 0 ] || curl_err "latest バージョンの解決" "$rc" "Releases が公開されているか確認"
   VERSION=$(printf '%s\n' "$latest_url" | sed -n 's|.*/tag/||p')
-  case "$VERSION" in
-    v[0-9]*) ;;
-    *) err "latest バージョンの解決に失敗 (取得値: $VERSION)" ;;
-  esac
+  if ! printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+    err "latest バージョンの解決に失敗 (取得値: $VERSION)"
+  fi
 fi
 base="https://github.com/${REPO}/releases/download/${VERSION}"
 
