@@ -79,11 +79,15 @@ case "$VARIANT" in
   slim|full) ;;
   *) err "VARIANT は slim か full (指定値: $VARIANT)" ;;
 esac
-case "$VERSION" in
-  latest|v[0-9]*) ;;
-  [0-9]*) VERSION="v$VERSION" ;;
-  *) err "VERSION の形式が不正 (例: v0.2.0)" ;;
-esac
+# latest / X.Y.Z / vX.Y.Z の完全一致のみ許可する (前方一致の case glob だと
+# 例えば "v0.3.0/../../x" のような文字列も v[0-9]* に一致してしまい、そのまま
+# release の URL 組み立てに使われるため grep -E で厳密に検査する)
+if printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  VERSION="v$VERSION"
+fi
+if [ "$VERSION" != latest ] && ! printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+  err "VERSION は latest か X.Y.Z か vX.Y.Z (指定値: $VERSION)"
+fi
 
 # target 自動判定。Linux は glibc バージョン非依存の musl (完全静的リンク) を既定にする
 if [ -z "$TARGET" ]; then
