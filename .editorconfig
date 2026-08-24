@@ -3,5 +3,8 @@ root = true
 [*]
 charset = utf-8
 
+# install.ps1 は BOM 無しの ASCII のみ (#44)。BOM があると irm | iex で先頭トークンに U+FEFF が
+# 結合して CommandNotFound になり、BOM 無しで非 ASCII があると Windows PowerShell 5.1 の
+# ファイル実行 (ANSI/cp932 読み) で後続の引用符・改行が食われて parse error になる。CI で検査する。
 [install.ps1]
-charset = utf-8-bom
+charset = utf-8
