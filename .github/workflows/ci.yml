@@ -47,9 +47,50 @@ jobs:
             $t = $null; $e = $null
             [System.Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$t, [ref]$e) | Out-Null
             if ($e.Count) { $e | ForEach-Object { Write-Error $_.Message }; exit 1 }'
+      # #44: BOM 付きだと irm | iex で先頭トークンに U+FEFF が結合して CommandNotFound になり、
+      # BOM 無しで非 ASCII があると Windows PowerShell 5.1 のファイル実行 (ANSI/cp932 読み) で
+      # 後続の引用符・改行が食われて parse error になる。両方を避けるため ASCII のみを強制する
+      - name: install.ps1 is ASCII without BOM
+        run: |
+          # C locale では [:print:] = 0x20-0x7E なので、BOM を含む非 ASCII バイトが全て引っかかる
+          if LC_ALL=C grep -n '[^[:print:][:space:]]' install.ps1; then
+            echo "install.ps1 must be ASCII-only without a BOM (see #44)" >&2
+            exit 1
+          fi
 
-  # 実 Releases に対する smoke。Linux は latest 解決込み、Windows は既存タグ固定
-  # (api.github.com の共有 runner での rate limit を避けるため)
+  # install.ps1 の Windows PowerShell 5.1 (issue #44 の再現環境) での検査。ネットワークは使わない
+  # (MIKKE_VERSION を不正にして最初の検査で throw させる)
+  install-script-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v7
+      # irm | iex 相当: ダウンロード内容は BOM を含んだ文字列のまま iex に渡る (ファイル実行と違い
+      # BOM が自動除去されない)。#44 はこの経路でのみ再現する
+      - name: irm | iex path
+        run: |
+          $env:MIKKE_VERSION = "not-a-version"
+          $text = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes("$PWD/install.ps1"))
+          try { $text | Invoke-Expression; throw "install.ps1 did not reject MIKKE_VERSION" }
+          catch { if ($_.Exception.Message -notmatch "^MIKKE_VERSION") { throw } }
+      - name: file path
+        run: |
+          $env:MIKKE_VERSION = "not-a-version"
+          try { & "$PWD/install.ps1"; throw "install.ps1 did not reject MIKKE_VERSION" }
+          catch { if ($_.Exception.Message -notmatch "^MIKKE_VERSION") { throw } }
+      # BOM 無しの install.ps1 を日本語 Windows の PowerShell 5.1 がファイル実行すると cp932 で読む。
+      # その読み方でも parse error にならないこと (非 ASCII が混入すると壊れる)
+      - name: parse as cp932
+        run: |
+          $text = [System.Text.Encoding]::GetEncoding(932).GetString([System.IO.File]::ReadAllBytes("$PWD/install.ps1"))
+          $t = $null; $e = $null
+          [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$t, [ref]$e) | Out-Null
+          if ($e.Count) { $e | ForEach-Object { Write-Error $_.Message }; exit 1 }
+
+  # 実 Releases に対する smoke (latest 解決込み)。Linux のみ常設し、Windows の実ダウンロード smoke は
+  # api.github.com の共有 runner での rate limit を避けるため常設から外している (変更時に手動確認)
   install-smoke:
     runs-on: ubuntu-latest
     steps:
