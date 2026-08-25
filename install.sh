@@ -189,6 +189,7 @@ canon() {
 # 実行も上書きも PATH の変更もしない (PATH 上の任意のプログラムを実行すると停止や副作用がありうる)
 installed_canon=$(canon "$INSTALL_DIR/mikke") || installed_canon="$INSTALL_DIR/mikke"
 active_canon=""
+active_via_abs=""
 resolved=$(command -v mikke 2>/dev/null) || resolved=""
 case "$resolved" in
   "") ;;
@@ -205,6 +206,8 @@ esac
 case "$resolved" in
   "") ;;
   */*)
+    # 絶対の PATH 要素で見つかったか (相対要素経由だと cwd を変えた途端に解決できなくなる)
+    case "$resolved" in /*) active_via_abs=1 ;; esac
     active_abs=$(abspath "$resolved") || active_abs="$resolved"
     active_canon=$(canon "$resolved") || active_canon="$active_abs"
     if [ "$active_canon" != "$active_abs" ]; then
@@ -223,11 +226,12 @@ case "$resolved" in
 esac
 
 # 配置先が PATH に無ければ追加方法を案内する (設定ファイルは自動では変更しない)。
-# symlink 経由で既に配置先が active なら不要
+# 絶対の PATH 要素 (symlink 含む) 経由で既に配置先が active なら不要。相対要素経由は
+# この cwd でしか解決できないので案内する
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *)
-    if [ "$active_canon" != "$installed_canon" ]; then
+    if [ -z "$active_via_abs" ] || [ "$active_canon" != "$installed_canon" ]; then
       printf '%s\n' "note: $INSTALL_DIR に PATH が通っていない。shell の設定ファイル (zsh: ~/.zshrc、bash: ~/.bashrc、macOS の bash: ~/.bash_profile) に次の 1 行を追加し、新しいターミナルを開く:"
       printf '%s\n' "  export PATH=\"$INSTALL_DIR:\$PATH\""
       printf '%s\n' "  fish なら: fish_add_path \"$INSTALL_DIR\""

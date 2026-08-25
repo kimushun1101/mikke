@@ -193,8 +193,9 @@ jobs:
           $warn = @($log -match "another mikke is found first on PATH")
           if (-not ($warn -match [regex]::Escape($com))) { throw "warning does not name $com (same-dir shadow missed)" }
 
-  # 実 Releases に対する smoke (latest 解決込み)。latest 解決 (api.github.com) を伴う smoke は Linux のみ
-  # (共有 runner での rate limit を避ける)。Windows はタグ固定の smoke を install-script-windows に置く
+  # 実 Releases に対する smoke (latest 解決込み)。install.sh の latest 解決は Releases の redirect
+  # (api.github.com を叩かない) なので常設できる。install.ps1 は api.github.com で解決するため、
+  # Windows は共有 runner での rate limit を避けてタグ固定の smoke を install-script-windows に置く
   install-smoke:
     runs-on: ubuntu-latest
     steps:
@@ -225,6 +226,17 @@ jobs:
             echo "配置先が相対パスのまま表示されている" >&2
             exit 1
           fi
+          # 配置先を指す PATH 要素が相対でも、この cwd でしか解決できないので絶対パスでの追加を案内すること
+          # (active: は出るが警告は出ない)
+          PATH="rel dir/bin:$PATH" sh "$GITHUB_WORKSPACE/install.sh" --slim --to "rel dir/bin" >"$RUNNER_TEMP/rel-path.log" 2>&1 && rc=0 || rc=$?
+          cat "$RUNNER_TEMP/rel-path.log"
+          [ "$rc" -eq 0 ]
+          grep -qF "active: $real_tmp/rel dir/bin/mikke" "$RUNNER_TEMP/rel-path.log"
+          if grep -q '先に見つかる' "$RUNNER_TEMP/rel-path.log"; then
+            echo "配置先そのものを別 mikke として警告している" >&2
+            exit 1
+          fi
+          grep -qF "  export PATH=\"$real_tmp/rel dir/bin:\$PATH\"" "$RUNNER_TEMP/rel-path.log"
       # HOME 未設定 (cron / systemd / コンテナ) でも --to だけで入ること
       - name: run install.sh (slim, HOME 未設定)
         run: env -u HOME sh install.sh --slim --to "$RUNNER_TEMP/bin-slim"
