@@ -138,8 +138,8 @@ jobs:
           if (-not ($log -match "^note: .*MIKKE_NO_MODIFY_PATH")) { throw "no opt-out note" }
           if (-not ($log -match "SetEnvironmentVariable")) { throw "no hint on how to add the dir to PATH manually" }
       # (c) PATH 上に別の mikke ((a) で入れた既定配置先) が先にある状態で別 dir へ入れると、"active:" 行が
-      # その exe を指し、解決先とその --version、所有元別の案内 (cargo でも旧既定でもないので汎用) を含む
-      # 警告が出ること。上書きや PATH の並べ替えは自動でしない (MIKKE_INSTALL_DIR での上書き案内も出さない)
+      # その exe を指し、それを名指しする警告が出ること。相手は実行せず、上書きや PATH の並べ替えもしない
+      # (MIKKE_INSTALL_DIR での上書き案内も出さない)
       - name: install to another dir while a different mikke is first on PATH (warns)
         run: |
           $env:MIKKE_VERSION = $env:SMOKE_VERSION
@@ -154,8 +154,6 @@ jobs:
           $warn = @($log -match "another mikke is found first on PATH")
           if ($warn.Count -eq 0) { throw "no shadowing warning" }
           if (-not ($warn -match [regex]::Escape($firstExe))) { throw "warning does not name the resolved path $firstExe" }
-          if (-not ($warn -match "mikke 0\.3\.1")) { throw "warning does not show the resolved binary's --version" }
-          if (-not ($log -match "whatever installed it")) { throw "no owner-based advice for a mikke of unknown origin" }
           if ($log -match "MIKKE_INSTALL_DIR=") { throw "must not suggest overwriting the other mikke with MIKKE_INSTALL_DIR" }
       # (d) 判定はディレクトリでなくファイル単位: PATH 先頭の mikke.ps1 (ExternalScript) と、配置先 dir 内で
       # PATHEXT 順により .exe に勝つ mikke.com を、それぞれ警告が名指しすること
@@ -168,7 +166,8 @@ jobs:
           # mikke.ps1 が PATH 先頭の dir にある
           $ps1Dir = Join-Path $env:RUNNER_TEMP "shadow-ps1"
           New-Item -ItemType Directory -Force $ps1Dir | Out-Null
-          Set-Content -Path (Join-Path $ps1Dir "mikke.ps1") -Value 'Write-Output "mikke 0.0.0 (fake ps1)"' -Encoding Ascii
+          # 実行されないことも確認する (実行されると marker ファイルができる)
+          Set-Content -Path (Join-Path $ps1Dir "mikke.ps1") -Value 'New-Item -ItemType File -Force (Join-Path $env:RUNNER_TEMP "shadow-ps1-was-run") | Out-Null' -Encoding Ascii
           $env:Path = "$ps1Dir;$origPath"
           $env:MIKKE_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "mikke-vs-ps1"
           $log = & "$PWD/install.ps1" *>&1 | ForEach-Object { "$_" }
@@ -178,7 +177,7 @@ jobs:
           if (-not ($log -contains "active: $ps1")) { throw "no active: line pointing at $ps1" }
           $warn = @($log -match "another mikke is found first on PATH")
           if (-not ($warn -match [regex]::Escape($ps1))) { throw "warning does not name $ps1" }
-          if (-not ($warn -match "fake ps1")) { throw "warning does not show the script's --version output" }
+          if (Test-Path (Join-Path $env:RUNNER_TEMP "shadow-ps1-was-run")) { throw "the shadowing mikke.ps1 was executed" }
           # mikke.com が配置先 dir にある (MZ 形式の exe は .com 名でも起動する)
           $comDir = Join-Path $env:RUNNER_TEMP "mikke-vs-com"
           New-Item -ItemType Directory -Force $comDir | Out-Null
@@ -193,39 +192,6 @@ jobs:
           if (-not ($log -contains "active: $com")) { throw "no active: line pointing at $com" }
           $warn = @($log -match "another mikke is found first on PATH")
           if (-not ($warn -match [regex]::Escape($com))) { throw "warning does not name $com (same-dir shadow missed)" }
-          if (-not ($log -match "PATHEXT")) { throw "no advice about the same-dir mikke.com" }
-      # (e) 所有元別の案内: $env:CARGO_HOME\bin の mikke は cargo 管理として "cargo uninstall mikke" を含む案内、
-      # 旧既定 %LOCALAPPDATA%\Programs\mikke の mikke は残骸として削除案内 (別の leftover note とは重複しない)
-      - name: owner-specific advice for a cargo-managed or old-default mikke on PATH
-        run: |
-          $env:MIKKE_VERSION = $env:SMOKE_VERSION
-          $env:MIKKE_NO_MODIFY_PATH = "1"
-          $origPath = $env:Path
-          $realExe = Join-Path $env:USERPROFILE ".local\bin\mikke.exe"
-          # cargo 管理 (CARGO_HOME を使い捨ての dir に向ける)
-          $env:CARGO_HOME = Join-Path $env:RUNNER_TEMP "fake-cargo"
-          $cargoBin = Join-Path $env:CARGO_HOME "bin"
-          New-Item -ItemType Directory -Force $cargoBin | Out-Null
-          Copy-Item $realExe (Join-Path $cargoBin "mikke.exe") -Force
-          $env:Path = "$cargoBin;$origPath"
-          $env:MIKKE_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "mikke-vs-cargo"
-          $log = & "$PWD/install.ps1" *>&1 | ForEach-Object { "$_" }
-          $log
-          if (-not ($log -match "^installed: ")) { throw "no installed: line" }
-          if (-not ($log -match "another mikke is found first on PATH")) { throw "no shadowing warning" }
-          if (-not ($log -match "cargo uninstall mikke")) { throw "no cargo-specific advice" }
-          # 旧既定の配置先
-          $oldDir = Join-Path $env:LOCALAPPDATA "Programs\mikke"
-          New-Item -ItemType Directory -Force $oldDir | Out-Null
-          Copy-Item $realExe (Join-Path $oldDir "mikke.exe") -Force
-          $env:Path = "$oldDir;$origPath"
-          $env:MIKKE_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "mikke-vs-old"
-          $log = & "$PWD/install.ps1" *>&1 | ForEach-Object { "$_" }
-          $log
-          if (-not ($log -match "^installed: ")) { throw "no installed: line" }
-          if (-not ($log -match "another mikke is found first on PATH")) { throw "no shadowing warning" }
-          if (-not ($log -match "leftover of the old default location: delete ")) { throw "no old-default-specific advice" }
-          if ($log -match "^note: .*leftover") { throw "leftover note duplicated the shadow warning" }
 
   # 実 Releases に対する smoke (latest 解決込み)。latest 解決 (api.github.com) を伴う smoke は Linux のみ
   # (共有 runner での rate limit を避ける)。Windows はタグ固定の smoke を install-script-windows に置く
@@ -235,14 +201,30 @@ jobs:
       - uses: actions/checkout@v7
       - name: run install.sh
         run: |
-          SHELL=/bin/zsh sh install.sh --to "$RUNNER_TEMP/bin" >"$RUNNER_TEMP/plain.log" 2>&1 && rc=0 || rc=$?
+          real_tmp=$(cd "$RUNNER_TEMP" && pwd -P)
+          sh install.sh --to "$RUNNER_TEMP/bin" >"$RUNNER_TEMP/plain.log" 2>&1 && rc=0 || rc=$?
           cat "$RUNNER_TEMP/plain.log"
           [ "$rc" -eq 0 ]
           grep -q '^installed:' "$RUNNER_TEMP/plain.log"
-          # 配置先が PATH に無ければ、$SHELL 別の追記先 (zsh → ~/.zshrc) と追記する 1 行、フルパスでの起動を案内すること
-          grep -qF "$HOME/.zshrc に次の 1 行" "$RUNNER_TEMP/plain.log"
-          grep -qF '  export PATH="' "$RUNNER_TEMP/plain.log"
-          grep -qF "フルパスで: $RUNNER_TEMP/bin/mikke" "$RUNNER_TEMP/plain.log"
+          # 配置先が PATH に無ければ、追記する 1 行とフルパスでの起動を案内すること (配置先は絶対物理パス)
+          grep -qF "  export PATH=\"$real_tmp/bin:\$PATH\"" "$RUNNER_TEMP/plain.log"
+          grep -qF "フルパスで: \"$real_tmp/bin/mikke\"" "$RUNNER_TEMP/plain.log"
+      # --to が相対パスや空白入りでも、表示と PATH 案内は絶対物理パス + quote 付きになること
+      # (相対のまま案内すると別 cwd で開いた shell では違う場所を指す)
+      - name: run install.sh (相対・空白入りの --to)
+        run: |
+          real_tmp=$(cd "$RUNNER_TEMP" && pwd -P)
+          cd "$RUNNER_TEMP"
+          sh "$GITHUB_WORKSPACE/install.sh" --slim --to "rel dir/bin" >"$RUNNER_TEMP/rel-to.log" 2>&1 && rc=0 || rc=$?
+          cat "$RUNNER_TEMP/rel-to.log"
+          [ "$rc" -eq 0 ]
+          grep -qF "installed: $real_tmp/rel dir/bin/mikke" "$RUNNER_TEMP/rel-to.log"
+          grep -qF "  export PATH=\"$real_tmp/rel dir/bin:\$PATH\"" "$RUNNER_TEMP/rel-to.log"
+          grep -qF "  fish なら: fish_add_path \"$real_tmp/rel dir/bin\"" "$RUNNER_TEMP/rel-to.log"
+          if grep -q 'installed: rel dir/' "$RUNNER_TEMP/rel-to.log"; then
+            echo "配置先が相対パスのまま表示されている" >&2
+            exit 1
+          fi
       # HOME 未設定 (cron / systemd / コンテナ) でも --to だけで入ること
       - name: run install.sh (slim, HOME 未設定)
         run: env -u HOME sh install.sh --slim --to "$RUNNER_TEMP/bin-slim"
@@ -290,8 +272,8 @@ jobs:
             fi
           done
       # PATH 上に別の mikke が先にある状態で --to 別 dir へ入れると、実際に起動する方を active: で示し、
-      # 取り違えを警告すること。上書き (MIKKE_INSTALL_DIR) は案内せず、PATH も自動では書き換えない (所有元に応じた
-      # 対処と PATH 順序の見直しを案内するだけ)。照合は pwd -P の物理パス (install.sh の出力に合わせる)
+      # 取り違えを警告すること。相手は実行せず (実行されると marker ファイルができる)、上書き (MIKKE_INSTALL_DIR)
+      # も案内しない。照合は pwd -P の物理パス (install.sh の出力に合わせる)
       - name: run install.sh (PATH 上の別 mikke を警告)
         run: |
           real_tmp=$(cd "$RUNNER_TEMP" && pwd -P)
@@ -299,6 +281,7 @@ jobs:
           cat > "$RUNNER_TEMP/shadow-bin/mikke" <<'EOF'
           #!/bin/sh
           printf 'mikke 0.0.0 (fake)\n'
+          : > "$RUNNER_TEMP/shadow-was-run"
           EOF
           chmod +x "$RUNNER_TEMP/shadow-bin/mikke"
           PATH="$RUNNER_TEMP/shadow-bin:$PATH" sh install.sh --slim --to "$RUNNER_TEMP/bin-shadow" >"$RUNNER_TEMP/shadow.log" 2>&1 && rc=0 || rc=$?
@@ -313,9 +296,12 @@ jobs:
             echo "PATH 上の別 mikke を警告していない" >&2
             exit 1
           fi
-          # 解決先のパス・その --version 1 行目・所有元 (汎用) の案内が含まれ、上書き案内は出さないこと
-          grep -qF "warning: PATH 上では $real_tmp/shadow-bin/mikke (mikke 0.0.0 (fake)) が先に見つかるため" "$RUNNER_TEMP/shadow.log"
-          grep -qF 'PATH の順序を見直す' "$RUNNER_TEMP/shadow.log"
+          # 解決先のパスが警告に含まれ、相手を実行せず、上書き案内も出さないこと
+          grep -qF "warning: PATH 上では $real_tmp/shadow-bin/mikke が先に見つかるため" "$RUNNER_TEMP/shadow.log"
+          if [ -e "$RUNNER_TEMP/shadow-was-run" ]; then
+            echo "PATH 上の別 mikke を実行している" >&2
+            exit 1
+          fi
           if grep -q 'MIKKE_INSTALL_DIR=' "$RUNNER_TEMP/shadow.log"; then
             echo "別 mikke を MIKKE_INSTALL_DIR で上書きする案内を出している" >&2
             exit 1
@@ -332,11 +318,12 @@ jobs:
           cat "$RUNNER_TEMP/shadow-rel.log"
           [ "$rc" -eq 0 ]
           grep -qF "active: $real_tmp/shadow-bin/mikke" "$RUNNER_TEMP/shadow-rel.log"
-          grep -qF "warning: PATH 上では $real_tmp/shadow-bin/mikke (mikke 0.0.0 (fake)) が先に見つかるため" "$RUNNER_TEMP/shadow-rel.log"
+          grep -qF "warning: PATH 上では $real_tmp/shadow-bin/mikke が先に見つかるため" "$RUNNER_TEMP/shadow-rel.log"
           if grep -q 'PATH 上では shadow-bin/mikke' "$RUNNER_TEMP/shadow-rel.log"; then
             echo "警告が相対パスのまま" >&2
             exit 1
           fi
+          [ ! -e "$RUNNER_TEMP/shadow-was-run" ]
       # 配置先を指す symlink が PATH 上で先に見つかる場合は同じ実体なので、警告も PATH の案内も出さず active: だけ出すこと
       - name: run install.sh (配置先への symlink は警告しない)
         run: |
@@ -353,25 +340,5 @@ jobs:
           fi
           if grep -q '^note:' "$RUNNER_TEMP/symlink.log"; then
             echo "symlink 経由で既に起動できるのに PATH の追加を案内している" >&2
-            exit 1
-          fi
-      # ~/.cargo/bin の mikke (cargo install 版) が先に見つかる場合は、上書きせず cargo 側での更新・削除を案内すること
-      - name: run install.sh (cargo install 版が先に見つかる場合の案内)
-        run: |
-          real_home=$(cd "$HOME" && pwd -P)
-          mkdir -p "$HOME/.cargo/bin"
-          if [ -e "$HOME/.cargo/bin/mikke" ]; then
-            echo "runner に $HOME/.cargo/bin/mikke が既にある" >&2
-            exit 1
-          fi
-          cp "$RUNNER_TEMP/shadow-bin/mikke" "$HOME/.cargo/bin/mikke"
-          PATH="$HOME/.cargo/bin:$PATH" sh install.sh --slim --to "$RUNNER_TEMP/bin-cargo" >"$RUNNER_TEMP/cargo.log" 2>&1 && rc=0 || rc=$?
-          rm -f "$HOME/.cargo/bin/mikke"
-          cat "$RUNNER_TEMP/cargo.log"
-          [ "$rc" -eq 0 ]
-          grep -qF "active: $real_home/.cargo/bin/mikke" "$RUNNER_TEMP/cargo.log"
-          grep -q 'cargo uninstall mikke' "$RUNNER_TEMP/cargo.log"
-          if grep -q 'PATH の順序を見直す' "$RUNNER_TEMP/cargo.log"; then
-            echo "cargo 版なのに汎用の案内を出している" >&2
             exit 1
           fi

@@ -15,11 +15,11 @@
 # default location is almost never on PATH at first install. Set
 # MIKKE_NO_MODIFY_PATH to opt out.
 # After placing the exe, the script prints which mikke the current session actually
-# starts ("active: ...") and warns when that is not the one just installed: a copy
-# earlier on PATH, a mikke.com / mikke.ps1 that wins by PATHEXT order, or an alias /
-# function named mikke. Nothing is overwritten or reordered automatically; the warning
-# says how to resolve it depending on what owns the other copy (cargo, the old default
-# location, something else).
+# starts ("active: ...") and warns when that is not the one just installed. The other
+# copy is only named, never run, overwritten or reordered.
+#
+# The whole body runs in a script block so that `irm | iex` leaves no functions or
+# variables behind in the caller's session.
 #
 # Use install.sh on Linux / macOS.
 #
@@ -37,6 +37,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5) {
     throw "mikke installer requires PowerShell 5 or later (running: $($PSVersionTable.PSVersion))"
 }
 
+& {
 $ErrorActionPreference = "Stop"
 
 $Repo = "kimushun1101/mikke"
@@ -98,26 +99,9 @@ function Test-PathListContains {
     return $false
 }
 
-# First line of `<exe> --version`, or a placeholder if it cannot be run. Native stderr under
-# $ErrorActionPreference = Stop would otherwise abort the installer for a broken executable.
-# The output is collected as a whole: stopping the pipeline early (Select-Object -First)
-# can leave the native process with exit code -1 in Windows PowerShell 5.1.
-function Get-VersionLine {
-    param([string]$Exe)
-
-    $ErrorActionPreference = "Continue"
-    try {
-        $Line = @(& $Exe --version 2>&1 | ForEach-Object { "$_" })
-        if ($Line.Count -gt 0 -and $Line[0]) { return $Line[0] }
-        return "no --version output"
-    }
-    catch {
-        return "--version failed"
-    }
-}
-
 # Broadcast WM_SETTINGCHANGE("Environment") so that Explorer and new terminals reload the
-# user PATH from the registry. Best effort: a failure only means a re-login is needed.
+# user PATH from the registry. Returns $false when the broadcast did not go through
+# (then a re-login is needed); never throws.
 function Send-EnvironmentChange {
     try {
         if (-not ("MikkeInstaller.NativeMethods" -as [type])) {
@@ -136,39 +120,12 @@ namespace MikkeInstaller {
         $WM_SETTINGCHANGE = 0x1A
         $SMTO_ABORTIFHUNG = 0x2
         $Result = [UIntPtr]::Zero
-        [MikkeInstaller.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [UIntPtr]::Zero, "Environment", $SMTO_ABORTIFHUNG, 5000, [ref]$Result) | Out-Null
+        $Ret = [MikkeInstaller.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [UIntPtr]::Zero, "Environment", $SMTO_ABORTIFHUNG, 5000, [ref]$Result)
+        return ($Ret -ne [IntPtr]::Zero)
     }
     catch {
-        Write-Host "note: could not notify running programs of the PATH change ($($_.Exception.Message)); terminals started after a re-login will see it"
+        return $false
     }
-}
-
-# One line of advice for a mikke that shadows the one just installed, chosen by what owns
-# the shadow. Overwriting it here would break its owner (cargo keeps metadata for
-# $CARGO_HOME/bin), so the shadow is never touched and PATH is never reordered.
-function Get-ShadowAdvice {
-    param([string]$ShadowPath, [string]$InstallDir)
-
-    $Compare = [StringComparer]::OrdinalIgnoreCase
-    $ShadowDir = ConvertTo-NormalizedPath (Split-Path -Parent $ShadowPath)
-    if ($ShadowDir -and $Compare.Equals($ShadowDir, $InstallDir)) {
-        return "it is in the install dir and wins over mikke.exe in PowerShell command lookup (.ps1 first, then PATHEXT order); delete $ShadowPath if it is not needed"
-    }
-    $CargoBinDirs = @()
-    if ($env:CARGO_HOME) { $CargoBinDirs += ConvertTo-NormalizedPath (Join-Path $env:CARGO_HOME "bin") }
-    if ($env:USERPROFILE) { $CargoBinDirs += ConvertTo-NormalizedPath (Join-Path $env:USERPROFILE ".cargo\bin") }
-    foreach ($CargoBinDir in $CargoBinDirs) {
-        if ($CargoBinDir -and $ShadowDir -and $Compare.Equals($CargoBinDir, $ShadowDir)) {
-            return "it is managed by cargo: keep it and update it by re-running 'cargo install --git https://github.com/kimushun1101/mikke --locked' (mikke is not on crates.io), or run 'cargo uninstall mikke' first to switch to this standalone install"
-        }
-    }
-    if ($env:LOCALAPPDATA) {
-        $OldDefaultDir = ConvertTo-NormalizedPath (Join-Path $env:LOCALAPPDATA "Programs\mikke")
-        if ($OldDefaultDir -and $ShadowDir -and $Compare.Equals($OldDefaultDir, $ShadowDir)) {
-            return "it is a leftover of the old default location: delete $OldDefaultDir and remove that entry from the user PATH"
-        }
-    }
-    return "update or remove it with whatever installed it (package manager, cargo, ...), or put $InstallDir before $ShadowDir on PATH"
 }
 
 $InstallDir = ConvertTo-NormalizedPath $InstallDir
@@ -265,8 +222,12 @@ try {
                 if ($EnvKey) { $EnvKey.Close() }
             }
             if ($AddedToUserPath) {
-                Send-EnvironmentChange
-                Write-Host "note: added $InstallDir to the user PATH (new terminals pick it up)"
+                if (Send-EnvironmentChange) {
+                    Write-Host "note: added $InstallDir to the user PATH (new terminals pick it up)"
+                }
+                else {
+                    Write-Host "note: added $InstallDir to the user PATH, but running programs could not be notified; terminals opened before a re-login may not see it"
+                }
             }
         }
         else {
@@ -281,8 +242,9 @@ try {
     # Which mikke does this session actually start? Get-Command without a type filter returns
     # the command that would run: an alias or function beats every file, and among files the
     # first PATH dir wins, with PATHEXT deciding between mikke.com / mikke.exe / mikke.ps1 in
-    # the same dir. So the comparison is per file, not per directory.
-    $ShadowDir = $null
+    # the same dir. So the comparison is per file, not per directory. The other copy is only
+    # named, never executed: it is an arbitrary program on PATH that could block or have
+    # side effects.
     $Resolved = Get-Command mikke -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $Resolved) {
         if (Test-PathListContains $env:Path $InstallDir) {
@@ -294,32 +256,16 @@ try {
         if (-not $ActivePath) { $ActivePath = $Resolved.Source }
         Write-Host "active: $ActivePath"
         if (-not [StringComparer]::OrdinalIgnoreCase.Equals($ActivePath, (ConvertTo-NormalizedPath $InstalledExe))) {
-            $ShadowDir = ConvertTo-NormalizedPath (Split-Path -Parent $ActivePath)
-            $ResolvedVersion = Get-VersionLine $ActivePath
-            # The shadow's exit code must not become this script's final native exit code.
-            $global:LASTEXITCODE = 0
-            Write-Warning "another mikke is found first on PATH: $ActivePath ($ResolvedVersion)"
-            Write-Warning (Get-ShadowAdvice $ActivePath $InstallDir)
+            Write-Warning "another mikke is found first on PATH and shadows ${InstalledExe}: $ActivePath"
+            Write-Warning "update or remove it with whatever installed it (cargo: 'cargo uninstall mikke'), put $InstallDir earlier on PATH, or delete it if it sits in ${InstallDir}; nothing is overwritten or reordered automatically"
         }
     }
     else {
         Write-Host "active: $($Resolved.CommandType) mikke"
         Write-Warning "mikke is a $($Resolved.CommandType) in this session and takes precedence over $InstalledExe; remove that definition (e.g. Remove-Item Function:mikke or Alias:mikke) or run the exe by full path"
     }
-
-    # A copy at the pre-#46 default location is a leftover unless that is where we just installed.
-    # Skipped when that copy is the one shadowing on PATH: the warning above already covers it.
-    if ($env:LOCALAPPDATA) {
-        $OldDefaultDir = ConvertTo-NormalizedPath (Join-Path $env:LOCALAPPDATA "Programs\mikke")
-        $OldDefaultIsShadow = $ShadowDir -and $OldDefaultDir -and [StringComparer]::OrdinalIgnoreCase.Equals($OldDefaultDir, $ShadowDir)
-        if ($OldDefaultDir -and -not $OldDefaultIsShadow -and -not [StringComparer]::OrdinalIgnoreCase.Equals($OldDefaultDir, $InstallDir)) {
-            $OldDefaultExe = Join-Path $OldDefaultDir "mikke.exe"
-            if (Test-Path $OldDefaultExe -PathType Leaf) {
-                Write-Host "note: $OldDefaultExe is a leftover of the old default location; it is unused unless $OldDefaultDir is on PATH and can be deleted"
-            }
-        }
-    }
 }
 finally {
     Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
+}
 }

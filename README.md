@@ -27,7 +27,7 @@ Windows (x86_64) は PowerShell で:
 irm https://raw.githubusercontent.com/kimushun1101/mikke/main/install.ps1 | iex
 ```
 
-配置先は両 OS とも `~/.local/bin` (Windows は `%USERPROFILE%\.local\bin`)。Linux / macOS は PATH に無ければ shell 別の追加方法を案内するだけだが、Windows は配置先をユーザー PATH に自動追加する (変更したくなければ実行前に `$env:MIKKE_NO_MODIFY_PATH = "1"`)。
+配置先は両 OS とも `~/.local/bin` (Windows は `%USERPROFILE%\.local\bin`)。Linux / macOS は PATH に無ければ追加方法を案内するだけだが、Windows は配置先をユーザー PATH に自動追加する (変更したくなければ実行前に `$env:MIKKE_NO_MODIFY_PATH = "1"`)。
 
 cargo でビルドして入れる場合 (既定はスクリプトと違い BM25 のみ):
 

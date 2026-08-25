@@ -141,6 +141,8 @@ printf '%s\n' "verified: SHA256SUMS OK"
 tar xzf "$tmp/$archive" -C "$tmp" mikke || err "アーカイブの展開に失敗 ($archive)"
 { [ -f "$tmp/mikke" ] && [ ! -L "$tmp/mikke" ]; } || err "アーカイブの内容が想定と異なる (mikke が通常ファイルでない)"
 mkdir -p "$INSTALL_DIR" || err "配置先ディレクトリを作れない: $INSTALL_DIR"
+# 相対指定 (--to relative-bin) でも以降の表示・PATH 案内が cwd に依存しないよう、絶対物理パスにする
+INSTALL_DIR=$(CDPATH='' cd -- "$INSTALL_DIR" && pwd -P) || err "配置先ディレクトリに入れない: $INSTALL_DIR"
 install -m 755 "$tmp/mikke" "$INSTALL_DIR/mikke" || err "配置に失敗: $INSTALL_DIR/mikke"
 [ -f "$INSTALL_DIR/mikke" ] || err "配置後に $INSTALL_DIR/mikke が通常ファイルとして見つからない"
 
@@ -181,14 +183,10 @@ canon() {
   done
   abspath "$p"
 }
-# $1 がディレクトリ $2 の直下にあるか (物理パスで比較。$2 が空・不在なら偽)
-in_dir() {
-  [ -n "$2" ] && d=$(CDPATH='' cd -- "$2" 2>/dev/null && pwd -P) && [ "$(dirname -- "$1")" = "$d" ]
-}
 
 # PATH 上で実際に起動する mikke (active) を示し、配置先と違えば警告する (別の場所に入れた
-# 旧版が先に見つかり、新版を入れたのに効かない取り違えを防ぐ)。上書きや PATH の書き換えは
-# しない — 所有元 (cargo 等) に応じた対処を案内するだけ
+# 旧版が先に見つかり、新版を入れたのに効かない取り違えを防ぐ)。相手はパスを示すだけで、
+# 実行も上書きも PATH の変更もしない (PATH 上の任意のプログラムを実行すると停止や副作用がありうる)
 installed_canon=$(canon "$INSTALL_DIR/mikke") || installed_canon="$INSTALL_DIR/mikke"
 active_canon=""
 resolved=$(command -v mikke 2>/dev/null) || resolved=""
@@ -215,14 +213,8 @@ case "$resolved" in
       printf '%s\n' "active: $active_abs"
     fi
     if [ "$active_canon" != "$installed_canon" ]; then
-      # stdin を切る (名前だけ同じ別プログラムが入力待ちで止まるのを防ぐ)
-      active_version=$("$active_abs" --version </dev/null 2>&1 | head -n 1) || :
-      printf '%s\n' "warning: PATH 上では $active_abs (${active_version:-バージョン不明}) が先に見つかるため、配置した $INSTALL_DIR/mikke は使われない"
-      if in_dir "$active_abs" "${CARGO_HOME:+$CARGO_HOME/bin}" || in_dir "$active_abs" "${HOME:+$HOME/.cargo/bin}"; then
-        printf '%s\n' "  これは cargo install で入れた版。cargo 版を使い続けるなら cargo install で更新し、このスクリプトの版へ移るなら先に cargo uninstall mikke で消す"
-      else
-        printf '%s\n' "  所有元 (パッケージマネージャ等) で更新・削除するか、PATH の順序を見直す"
-      fi
+      printf '%s\n' "warning: PATH 上では $active_abs が先に見つかるため、配置した $INSTALL_DIR/mikke は使われない"
+      printf '%s\n' "  所有元 (cargo 版なら cargo uninstall mikke、パッケージマネージャ等) で更新・削除するか、PATH で $INSTALL_DIR を前に置く。このスクリプトは上書きも PATH の変更もしない"
     fi
     ;;
   *)
@@ -230,33 +222,16 @@ case "$resolved" in
     ;;
 esac
 
-# 配置先が PATH に無ければ shell 別に追加方法を案内する (設定ファイルは自動では変更しない)。
+# 配置先が PATH に無ければ追加方法を案内する (設定ファイルは自動では変更しない)。
 # symlink 経由で既に配置先が active なら不要
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *)
     if [ "$active_canon" != "$installed_canon" ]; then
-      # $HOME 配下なら設定ファイルに書く 1 行として自然な $HOME 表記にする
-      path_dir="$INSTALL_DIR"
-      if [ -n "${HOME:-}" ]; then
-        case "$INSTALL_DIR" in
-          "$HOME"/*) path_dir="\$HOME/${INSTALL_DIR#"$HOME"/}" ;;
-        esac
-      fi
-      path_line="export PATH=\"$path_dir:\$PATH\""
-      case "$(basename -- "${SHELL:-sh}")" in
-        zsh) rc_file=~/.zshrc ;;
-        bash) if [ "$(uname -s)" = Darwin ]; then rc_file=~/.bash_profile; else rc_file=~/.bashrc; fi ;;
-        fish) rc_file=""; path_line="fish_add_path $path_dir" ;;
-        *) rc_file="shell の設定ファイル (~/.profile 等)" ;;
-      esac
-      if [ -n "$rc_file" ]; then
-        printf '%s\n' "note: $INSTALL_DIR に PATH が通っていない。$rc_file に次の 1 行を追加し、新しいターミナルを開く:"
-      else
-        printf '%s\n' "note: $INSTALL_DIR に PATH が通っていない。fish で次を一度実行する (universal 変数として残る):"
-      fi
-      printf '%s\n' "  $path_line"
-      printf '%s\n' "  今すぐ使うならフルパスで: $INSTALL_DIR/mikke"
+      printf '%s\n' "note: $INSTALL_DIR に PATH が通っていない。shell の設定ファイル (zsh: ~/.zshrc、bash: ~/.bashrc、macOS の bash: ~/.bash_profile) に次の 1 行を追加し、新しいターミナルを開く:"
+      printf '%s\n' "  export PATH=\"$INSTALL_DIR:\$PATH\""
+      printf '%s\n' "  fish なら: fish_add_path \"$INSTALL_DIR\""
+      printf '%s\n' "  今すぐ使うならフルパスで: \"$INSTALL_DIR/mikke\""
     fi
     ;;
 esac
