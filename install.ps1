@@ -4,10 +4,16 @@
 #   irm https://raw.githubusercontent.com/kimushun1101/mikke/main/install.ps1 | iex
 #
 # Options are given via environment variables (parameters cannot be passed through iex):
-#   $env:MIKKE_VARIANT     = "slim"      # full (default) / slim
-#   $env:MIKKE_VERSION     = "v0.2.0"    # default: latest
-#   $env:MIKKE_INSTALL_DIR = "C:/tools"  # default: $env:LOCALAPPDATA/Programs/mikke
+#   $env:MIKKE_VARIANT        = "slim"      # full (default) / slim
+#   $env:MIKKE_VERSION        = "v0.2.0"    # default: latest
+#   $env:MIKKE_INSTALL_DIR    = "C:/tools"  # default: $env:USERPROFILE/.local/bin (same as install.sh)
+#   $env:MIKKE_NO_MODIFY_PATH = "1"         # do not touch the user PATH; only print how to add it
 # MIKKE_TARGET is not provided because there is only one Windows target.
+#
+# PATH: unlike install.sh, this script adds the install dir to the user PATH (HKCU)
+# when it is missing. Windows has no conventional per-user bin directory, so the
+# default location is almost never on PATH at first install. Set
+# MIKKE_NO_MODIFY_PATH to opt out.
 #
 # Use install.sh on Linux / macOS.
 #
@@ -30,7 +36,14 @@ $ErrorActionPreference = "Stop"
 $Repo = "kimushun1101/mikke"
 $Variant = if ($env:MIKKE_VARIANT) { $env:MIKKE_VARIANT } else { "full" }
 $Version = if ($env:MIKKE_VERSION) { $env:MIKKE_VERSION } else { "latest" }
-$InstallDir = if ($env:MIKKE_INSTALL_DIR) { $env:MIKKE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\mikke" }
+$InstallDir = $env:MIKKE_INSTALL_DIR
+if (-not $InstallDir) {
+    # Same default as install.sh (~/.local/bin). HOME is a fallback for environments that
+    # set it without USERPROFILE (MSYS, Cygwin).
+    $HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } elseif ($env:HOME) { $env:HOME } else { $null }
+    if (-not $HomeDir) { throw "cannot determine the home directory (USERPROFILE and HOME are both empty); set MIKKE_INSTALL_DIR" }
+    $InstallDir = Join-Path $HomeDir ".local\bin"
+}
 
 if (@("slim", "full") -notcontains $Variant) { throw "MIKKE_VARIANT must be slim or full (got: $Variant)" }
 if ($Version -cmatch "^[0-9]+\.[0-9]+\.[0-9]+$") { $Version = "v$Version" }
@@ -63,6 +76,62 @@ function ConvertTo-NormalizedPath {
     }
     catch {
         return $null
+    }
+}
+
+# True if a ";"-separated PATH list contains $Dir (compared after normalization).
+function Test-PathListContains {
+    param([string]$PathList, [string]$Dir)
+
+    foreach ($PathEntry in ($PathList -split ";")) {
+        $NormalizedPathEntry = ConvertTo-NormalizedPath $PathEntry
+        if ($NormalizedPathEntry -and [StringComparer]::OrdinalIgnoreCase.Equals($NormalizedPathEntry, $Dir)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+# First line of `<exe> --version`, or a placeholder if it cannot be run. Native stderr under
+# $ErrorActionPreference = Stop would otherwise abort the installer for a broken executable.
+function Get-VersionLine {
+    param([string]$Exe)
+
+    $ErrorActionPreference = "Continue"
+    try {
+        $Line = @(& $Exe --version 2>&1 | ForEach-Object { "$_" } | Select-Object -First 1)
+        if ($Line.Count -gt 0 -and $Line[0]) { return $Line[0] }
+        return "no --version output"
+    }
+    catch {
+        return "--version failed"
+    }
+}
+
+# Broadcast WM_SETTINGCHANGE("Environment") so that Explorer and new terminals reload the
+# user PATH from the registry. Best effort: a failure only means a re-login is needed.
+function Send-EnvironmentChange {
+    try {
+        if (-not ("MikkeInstaller.NativeMethods" -as [type])) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+namespace MikkeInstaller {
+    public static class NativeMethods {
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+    }
+}
+"@
+        }
+        $HWND_BROADCAST = [IntPtr]0xffff
+        $WM_SETTINGCHANGE = 0x1A
+        $SMTO_ABORTIFHUNG = 0x2
+        $Result = [UIntPtr]::Zero
+        [MikkeInstaller.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [UIntPtr]::Zero, "Environment", $SMTO_ABORTIFHUNG, 5000, [ref]$Result) | Out-Null
+    }
+    catch {
+        Write-Host "note: could not notify running programs of the PATH change ($($_.Exception.Message)); terminals started after a re-login will see it"
     }
 }
 
@@ -121,24 +190,75 @@ try {
     if (-not (Test-Path $Exe -PathType Leaf)) { throw "failed to extract mikke.exe" }
 
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    Copy-Item $Exe (Join-Path $InstallDir "mikke.exe") -Force
-    Write-Host "installed: $(Join-Path $InstallDir 'mikke.exe')"
-    & (Join-Path $InstallDir "mikke.exe") --version
+    $InstalledExe = Join-Path $InstallDir "mikke.exe"
+    Copy-Item $Exe $InstalledExe -Force
+    Write-Host "installed: $InstalledExe"
+    & $InstalledExe --version
 
-    # Check PATH (print a hint if the install dir is in neither the current session nor
-    # the user environment variable).
-    $Paths = ($env:Path -split ";") + ([Environment]::GetEnvironmentVariable("Path", "User") -split ";")
-    $PathContainsInstallDir = $false
-    foreach ($PathEntry in $Paths) {
-        $NormalizedPathEntry = ConvertTo-NormalizedPath $PathEntry
-        if ($NormalizedPathEntry -and [StringComparer]::OrdinalIgnoreCase.Equals($NormalizedPathEntry, $InstallDir)) {
-            $PathContainsInstallDir = $true
-            break
+    # PATH. The user PATH (HKCU\Environment) is what new terminals inherit. The registry is
+    # read and written directly rather than via [Environment]::SetEnvironmentVariable, which
+    # would rewrite the value as REG_SZ with every %VAR% reference expanded (the Windows
+    # default user PATH is a REG_EXPAND_SZ containing %USERPROFILE%). The containment check
+    # uses the expanded value; the write appends to the raw value and keeps REG_EXPAND_SZ.
+    # WM_SETTINGCHANGE is broadcast so that new terminals pick the change up without a
+    # re-login. The current session is updated too so that `mikke` works right away.
+    $ModifyPath = -not $env:MIKKE_NO_MODIFY_PATH
+    $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if (-not (Test-PathListContains $UserPath $InstallDir)) {
+        if ($ModifyPath) {
+            $EnvKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+            if ($EnvKey) {
+                try {
+                    $RawUserPath = [string]$EnvKey.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    $NewUserPath = if ([string]::IsNullOrWhiteSpace($RawUserPath)) { $InstallDir } else { $RawUserPath.TrimEnd(";") + ";" + $InstallDir }
+                    $EnvKey.SetValue("Path", $NewUserPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+                }
+                finally { $EnvKey.Close() }
+                Send-EnvironmentChange
+                Write-Host "note: added $InstallDir to the user PATH (new terminals pick it up)"
+            }
+            else {
+                # The install itself succeeded; do not fail over the PATH convenience.
+                Write-Host "note: could not open HKCU\Environment, so $InstallDir was not added to the user PATH. Add it with (effective in a new terminal):"
+                Write-Host "  [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';' + '$InstallDir', 'User')"
+            }
+        }
+        else {
+            Write-Host "note: $InstallDir is not on the user PATH (MIKKE_NO_MODIFY_PATH is set, so it was not added). Re-run without MIKKE_NO_MODIFY_PATH, or add it with (effective in a new terminal):"
+            Write-Host "  [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';' + '$InstallDir', 'User')"
         }
     }
-    if (-not $PathContainsInstallDir) {
-        Write-Host "note: $InstallDir is not on PATH. Add it with (effective in a new terminal):"
-        Write-Host "  [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';' + '$InstallDir', 'User')"
+    if ($ModifyPath -and -not (Test-PathListContains $env:Path $InstallDir)) {
+        $env:Path = if ([string]::IsNullOrWhiteSpace($env:Path)) { $InstallDir } else { $env:Path.TrimEnd(";") + ";" + $InstallDir }
+    }
+
+    # Check which mikke the current PATH actually resolves to; another copy earlier on PATH
+    # would shadow the one just installed.
+    $ShadowDir = $null
+    $Resolved = Get-Command mikke -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($Resolved) {
+        $ResolvedDir = ConvertTo-NormalizedPath (Split-Path -Parent $Resolved.Source)
+        if (-not ($ResolvedDir -and [StringComparer]::OrdinalIgnoreCase.Equals($ResolvedDir, $InstallDir))) {
+            $ShadowDir = $ResolvedDir
+            $ResolvedVersion = Get-VersionLine $Resolved.Source
+            # The shadow's exit code must not become this script's final native exit code.
+            $global:LASTEXITCODE = 0
+            Write-Warning "another mikke is found first on PATH: $($Resolved.Source) ($ResolvedVersion)"
+            Write-Warning "remove it, or overwrite it by reinstalling with MIKKE_INSTALL_DIR=$ResolvedDir"
+        }
+    }
+
+    # A copy at the pre-#46 default location is a leftover unless that is where we just installed.
+    # Skipped when that copy is the one shadowing on PATH: the warning above already covers it.
+    if ($env:LOCALAPPDATA) {
+        $OldDefaultDir = ConvertTo-NormalizedPath (Join-Path $env:LOCALAPPDATA "Programs\mikke")
+        $OldDefaultIsShadow = $ShadowDir -and $OldDefaultDir -and [StringComparer]::OrdinalIgnoreCase.Equals($OldDefaultDir, $ShadowDir)
+        if ($OldDefaultDir -and -not $OldDefaultIsShadow -and -not [StringComparer]::OrdinalIgnoreCase.Equals($OldDefaultDir, $InstallDir)) {
+            $OldDefaultExe = Join-Path $OldDefaultDir "mikke.exe"
+            if (Test-Path $OldDefaultExe -PathType Leaf) {
+                Write-Host "note: $OldDefaultExe is a leftover of the old default location; it is unused unless $OldDefaultDir is on PATH and can be deleted"
+            }
+        }
     }
 }
 finally {

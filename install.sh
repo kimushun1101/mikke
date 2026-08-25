@@ -165,3 +165,20 @@ case ":$PATH:" in
   *":$INSTALL_DIR:"*) : ;;
   *) printf '%s\n' "note: $INSTALL_DIR に PATH が通っていない。shell 設定への追加が必要" ;;
 esac
+
+# PATH 上で実際に解決される mikke が配置先と違えば警告する (別の場所に入れた旧版が
+# 先に見つかり、新版を入れたのに効かない取り違えを防ぐ)。ディレクトリは物理パスに
+# 正規化して比較する (readlink -f は macOS に無いので cd && pwd -P で代用)
+canon() {
+  d=$(CDPATH= cd -- "$(dirname -- "$1")" 2>/dev/null && pwd -P) && printf '%s/%s' "$d" "$(basename -- "$1")"
+}
+resolved=$(command -v mikke 2>/dev/null) || resolved=""
+case "$resolved" in
+  /*) ;;
+  *) resolved="" ;;  # 関数・alias 等の非パスは対象外
+esac
+if [ -n "$resolved" ] && [ "$(canon "$resolved")" != "$(canon "$INSTALL_DIR/mikke")" ]; then
+  # stdin を切る (名前だけ同じ別プログラムが入力待ちで止まるのを防ぐ)
+  resolved_version=$("$resolved" --version </dev/null 2>&1 | head -n 1) || :
+  printf '%s\n' "warning: PATH 上では $resolved (${resolved_version:-バージョン不明}) が先に見つかる。それを消すか、MIKKE_INSTALL_DIR=$(dirname "$resolved") で上書きする"
+fi

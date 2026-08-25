@@ -27,13 +27,15 @@ Windows (x86_64) は PowerShell で:
 irm https://raw.githubusercontent.com/kimushun1101/mikke/main/install.ps1 | iex
 ```
 
+配置先は両 OS とも `~/.local/bin` (Windows は `%USERPROFILE%\.local\bin`)。Linux / macOS は PATH に無ければ追加を案内するだけだが、Windows は配置先をユーザー PATH に自動追加する (変更したくなければ実行前に `$env:MIKKE_NO_MODIFY_PATH = "1"`)。
+
 cargo でビルドして入れる場合 (既定はスクリプトと違い BM25 のみ):
 
 ```bash
 cargo install --git https://github.com/kimushun1101/mikke --locked
 ```
 
-既定で semantic 検索入りの full 版が入る (cargo install のみ BM25 のみが既定)。slim 版の指定・環境変数によるオプション・Releases からの手動取得・トラブルシューティングは [docs/install.md](docs/install.md)。
+既定で semantic 検索入りの full 版が入る (cargo install のみ BM25 のみが既定)。slim 版の指定・環境変数によるオプション・PATH の扱い・Releases からの手動取得・トラブルシューティングは [docs/install.md](docs/install.md)。
 
 ## 使い方
 

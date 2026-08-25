@@ -58,13 +58,17 @@ jobs:
             exit 1
           fi
 
-  # install.ps1 の Windows PowerShell 5.1 (issue #44 の再現環境) での検査。ネットワークは使わない
-  # (MIKKE_VERSION を不正にして最初の検査で throw させる)
+  # install.ps1 の Windows PowerShell 5.1 (issue #44 の再現環境) での検査。
+  # 前半 3 step はネットワークを使わない (MIKKE_VERSION を不正にして最初の検査で throw させる)。
+  # 後半はタグ固定 (MIKKE_VERSION) の実ダウンロード smoke (#46)。latest 解決 (api.github.com) は
+  # 共有 runner での rate limit を避けるため使わない
   install-script-windows:
     runs-on: windows-latest
     defaults:
       run:
         shell: powershell
+    env:
+      SMOKE_VERSION: v0.3.1
     steps:
       - uses: actions/checkout@v7
       # irm | iex 相当: ダウンロード内容は BOM を含んだ文字列のまま iex に渡る (ファイル実行と違い
@@ -88,9 +92,68 @@ jobs:
           $t = $null; $e = $null
           [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$t, [ref]$e) | Out-Null
           if ($e.Count) { $e | ForEach-Object { Write-Error $_.Message }; exit 1 }
+      # (a) 既定配置先 $env:USERPROFILE\.local\bin に入り、ユーザー PATH (レジストリ HKCU) に自動追加され、
+      # 現セッションの $env:Path にも足されて Get-Command mikke がそこを指すこと。
+      # step ごとにシェルが新規なので $env:Path の追加は step を跨がないが、レジストリの変更は後続 step に残る
+      - name: install to the default dir (adds it to the user PATH)
+        run: |
+          $env:MIKKE_VERSION = $env:SMOKE_VERSION
+          $expectedDir = Join-Path $env:USERPROFILE ".local\bin"
+          $expectedExe = Join-Path $expectedDir "mikke.exe"
+          # runner image が既に ~\.local\bin をユーザー PATH に載せていても「追加」分岐を検証できるよう、
+          # 使い捨て runner のユーザー PATH から該当エントリを外しておく
+          $userPath = ([Environment]::GetEnvironmentVariable("Path", "User") -split ";") | Where-Object { $_ -and $_ -ne $expectedDir }
+          [Environment]::SetEnvironmentVariable("Path", ($userPath -join ";"), "User")
+          $log = & "$PWD/install.ps1" *>&1 | ForEach-Object { "$_" }
+          $log
+          if (-not ($log -match "^installed: ")) { throw "no installed: line" }
+          if (-not (Test-Path $expectedExe -PathType Leaf)) { throw "mikke.exe is not at the default location $expectedExe" }
+          if (-not ($log -match "^note: added ")) { throw "no note about adding the install dir to the user PATH" }
+          if (-not (([Environment]::GetEnvironmentVariable("Path", "User") -split ";") -contains $expectedDir)) {
+            throw "$expectedDir was not added to the user PATH (registry)"
+          }
+          if (-not (($env:Path -split ";") -contains $expectedDir)) { throw "$expectedDir was not added to this session's PATH" }
+          if ($log -match "another mikke") { throw "unexpected shadowing warning" }
+          $resolved = (Get-Command mikke -CommandType Application).Source
+          if ($resolved -ne $expectedExe) { throw "Get-Command mikke resolved to $resolved, expected $expectedExe" }
+          $version = (& mikke --version | Select-Object -First 1)
+          if ($version -notmatch "^mikke 0\.3\.1\b") { throw "unexpected version output: $version" }
+      # (b) MIKKE_NO_MODIFY_PATH ではユーザー PATH (レジストリ) を変えず、手動追加の案内を出すこと
+      - name: install with MIKKE_NO_MODIFY_PATH (leaves the user PATH alone)
+        run: |
+          $env:MIKKE_VERSION = $env:SMOKE_VERSION
+          $env:MIKKE_NO_MODIFY_PATH = "1"
+          $env:MIKKE_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "mikke-optout"
+          $before = [Environment]::GetEnvironmentVariable("Path", "User")
+          $sessionBefore = $env:Path
+          $log = & "$PWD/install.ps1" *>&1 | ForEach-Object { "$_" }
+          $log
+          if (-not ($log -match "^installed: ")) { throw "no installed: line" }
+          if (-not (Test-Path (Join-Path $env:MIKKE_INSTALL_DIR "mikke.exe") -PathType Leaf)) { throw "mikke.exe is not in MIKKE_INSTALL_DIR" }
+          if ([Environment]::GetEnvironmentVariable("Path", "User") -cne $before) { throw "user PATH changed despite MIKKE_NO_MODIFY_PATH" }
+          if ($env:Path -cne $sessionBefore) { throw "session PATH changed despite MIKKE_NO_MODIFY_PATH" }
+          if (-not ($log -match "^note: .*MIKKE_NO_MODIFY_PATH")) { throw "no opt-out note" }
+          if (-not ($log -match "SetEnvironmentVariable")) { throw "no hint on how to add the dir to PATH manually" }
+      # (c) PATH 上に別の mikke ((a) で入れた既定配置先) が先にある状態で別 dir へ入れると、解決先と
+      # その --version、MIKKE_INSTALL_DIR での上書き案内を含む警告が出ること
+      - name: install to another dir while a different mikke is first on PATH (warns)
+        run: |
+          $env:MIKKE_VERSION = $env:SMOKE_VERSION
+          $firstDir = Join-Path $env:USERPROFILE ".local\bin"
+          $firstExe = Join-Path $firstDir "mikke.exe"
+          $env:Path = "$firstDir;$env:Path"
+          $env:MIKKE_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "mikke-shadowed"
+          $log = & "$PWD/install.ps1" *>&1 | ForEach-Object { "$_" }
+          $log
+          if (-not ($log -match "^installed: ")) { throw "no installed: line" }
+          $warn = @($log -match "another mikke is found first on PATH")
+          if ($warn.Count -eq 0) { throw "no shadowing warning" }
+          if (-not ($warn -match [regex]::Escape($firstExe))) { throw "warning does not name the resolved path $firstExe" }
+          if (-not ($warn -match "mikke 0\.3\.1")) { throw "warning does not show the resolved binary's --version" }
+          if (-not ($log -match "MIKKE_INSTALL_DIR=" + [regex]::Escape($firstDir))) { throw "no hint to overwrite with MIKKE_INSTALL_DIR" }
 
-  # 実 Releases に対する smoke (latest 解決込み)。Linux のみ常設し、Windows の実ダウンロード smoke は
-  # api.github.com の共有 runner での rate limit を避けるため常設から外している (変更時に手動確認)
+  # 実 Releases に対する smoke (latest 解決込み)。latest 解決 (api.github.com) を伴う smoke は Linux のみ
+  # (共有 runner での rate limit を避ける)。Windows はタグ固定の smoke を install-script-windows に置く
   install-smoke:
     runs-on: ubuntu-latest
     steps:
@@ -143,3 +206,28 @@ jobs:
               exit 1
             fi
           done
+      # PATH 上に別の mikke が先にある状態で --to 別 dir へ入れると、解決先の取り違えを警告すること
+      - name: run install.sh (PATH 上の別 mikke を警告)
+        run: |
+          mkdir -p "$RUNNER_TEMP/shadow-bin"
+          cat > "$RUNNER_TEMP/shadow-bin/mikke" <<'EOF'
+          #!/bin/sh
+          printf 'mikke 0.0.0 (fake)\n'
+          EOF
+          chmod +x "$RUNNER_TEMP/shadow-bin/mikke"
+          PATH="$RUNNER_TEMP/shadow-bin:$PATH" sh install.sh --slim --to "$RUNNER_TEMP/bin-shadow" >"$RUNNER_TEMP/shadow.log" 2>&1 && rc=0 || rc=$?
+          cat "$RUNNER_TEMP/shadow.log"
+          if [ "$rc" -ne 0 ]; then
+            echo "別 mikke が PATH にあるだけで失敗した (exit $rc)" >&2
+            exit 1
+          fi
+          grep -q '^installed:' "$RUNNER_TEMP/shadow.log"
+          if ! grep -q '先に見つかる' "$RUNNER_TEMP/shadow.log"; then
+            echo "PATH 上の別 mikke を警告していない" >&2
+            exit 1
+          fi
+          # 解決先のパス・その --version 1 行目・上書き用の MIKKE_INSTALL_DIR が案内に含まれること
+          grep -qF "warning: PATH 上では $RUNNER_TEMP/shadow-bin/mikke (mikke 0.0.0 (fake)) が先に見つかる" "$RUNNER_TEMP/shadow.log"
+          grep -qF "MIKKE_INSTALL_DIR=$RUNNER_TEMP/shadow-bin" "$RUNNER_TEMP/shadow.log"
+          # 配置先の本物は入っていること
+          "$RUNNER_TEMP/bin-shadow/mikke" --version
