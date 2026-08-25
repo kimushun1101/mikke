@@ -194,6 +194,8 @@ resolved=$(command -v mikke 2>/dev/null) || resolved=""
 # 関数・alias・builtin は PATH 検索より常に優先される。command -v は関数でも、dash が PATH の
 # 空要素 (= cwd) で見つけた実行ファイルでも裸の名前 "mikke" を返すので、名前では区別できない。
 # PATH を解決不能にした subshell で command -v がまだ見つけるなら関数等と判定する
+# (subshell 内の PATH 変更は意図的で、外には漏れない)
+# shellcheck disable=SC2123,SC2030,SC2031
 non_file=$( (PATH=/dev/null; command -v mikke) 2>/dev/null ) || non_file=""
 if [ -n "$non_file" ]; then
   resolved="$non_file"
@@ -229,6 +231,7 @@ esac
 # 配置先が PATH に無ければ追加方法を案内する (設定ファイルは自動では変更しない)。
 # 絶対の PATH 要素 (symlink 含む) 経由で既に配置先が active なら不要。相対要素経由は
 # この cwd でしか解決できないので案内する
+# shellcheck disable=SC2031
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *)
