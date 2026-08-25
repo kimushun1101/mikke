@@ -170,7 +170,7 @@ esac
 # 先に見つかり、新版を入れたのに効かない取り違えを防ぐ)。ディレクトリは物理パスに
 # 正規化して比較する (readlink -f は macOS に無いので cd && pwd -P で代用)
 canon() {
-  d=$(CDPATH= cd -- "$(dirname -- "$1")" 2>/dev/null && pwd -P) && printf '%s/%s' "$d" "$(basename -- "$1")"
+  d=$(CDPATH='' cd -- "$(dirname -- "$1")" 2>/dev/null && pwd -P) && printf '%s/%s' "$d" "$(basename -- "$1")"
 }
 resolved=$(command -v mikke 2>/dev/null) || resolved=""
 case "$resolved" in
