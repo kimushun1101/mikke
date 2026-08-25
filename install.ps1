@@ -14,6 +14,12 @@
 # when it is missing. Windows has no conventional per-user bin directory, so the
 # default location is almost never on PATH at first install. Set
 # MIKKE_NO_MODIFY_PATH to opt out.
+# After placing the exe, the script prints which mikke the current session actually
+# starts ("active: ...") and warns when that is not the one just installed: a copy
+# earlier on PATH, a mikke.com / mikke.ps1 that wins by PATHEXT order, or an alias /
+# function named mikke. Nothing is overwritten or reordered automatically; the warning
+# says how to resolve it depending on what owns the other copy (cargo, the old default
+# location, something else).
 #
 # Use install.sh on Linux / macOS.
 #
@@ -137,6 +143,34 @@ namespace MikkeInstaller {
     }
 }
 
+# One line of advice for a mikke that shadows the one just installed, chosen by what owns
+# the shadow. Overwriting it here would break its owner (cargo keeps metadata for
+# $CARGO_HOME/bin), so the shadow is never touched and PATH is never reordered.
+function Get-ShadowAdvice {
+    param([string]$ShadowPath, [string]$InstallDir)
+
+    $Compare = [StringComparer]::OrdinalIgnoreCase
+    $ShadowDir = ConvertTo-NormalizedPath (Split-Path -Parent $ShadowPath)
+    if ($ShadowDir -and $Compare.Equals($ShadowDir, $InstallDir)) {
+        return "it is in the install dir and wins over mikke.exe in PowerShell command lookup (.ps1 first, then PATHEXT order); delete $ShadowPath if it is not needed"
+    }
+    $CargoBinDirs = @()
+    if ($env:CARGO_HOME) { $CargoBinDirs += ConvertTo-NormalizedPath (Join-Path $env:CARGO_HOME "bin") }
+    if ($env:USERPROFILE) { $CargoBinDirs += ConvertTo-NormalizedPath (Join-Path $env:USERPROFILE ".cargo\bin") }
+    foreach ($CargoBinDir in $CargoBinDirs) {
+        if ($CargoBinDir -and $ShadowDir -and $Compare.Equals($CargoBinDir, $ShadowDir)) {
+            return "it is managed by cargo: keep it and update it by re-running 'cargo install --git https://github.com/kimushun1101/mikke --locked' (mikke is not on crates.io), or run 'cargo uninstall mikke' first to switch to this standalone install"
+        }
+    }
+    if ($env:LOCALAPPDATA) {
+        $OldDefaultDir = ConvertTo-NormalizedPath (Join-Path $env:LOCALAPPDATA "Programs\mikke")
+        if ($OldDefaultDir -and $ShadowDir -and $Compare.Equals($OldDefaultDir, $ShadowDir)) {
+            return "it is a leftover of the old default location: delete $OldDefaultDir and remove that entry from the user PATH"
+        }
+    }
+    return "update or remove it with whatever installed it (package manager, cargo, ...), or put $InstallDir before $ShadowDir on PATH"
+}
+
 $InstallDir = ConvertTo-NormalizedPath $InstallDir
 if (-not $InstallDir) { throw "MIKKE_INSTALL_DIR is invalid (got: $env:MIKKE_INSTALL_DIR)" }
 
@@ -203,26 +237,36 @@ try {
     # default user PATH is a REG_EXPAND_SZ containing %USERPROFILE%). The containment check
     # uses the expanded value; the write appends to the raw value and keeps REG_EXPAND_SZ.
     # WM_SETTINGCHANGE is broadcast so that new terminals pick the change up without a
-    # re-login. The current session is updated too so that `mikke` works right away.
+    # re-login. The current session is updated too so that `mikke` works right away, but
+    # only when the user PATH has the dir (already, or just added): a session-only PATH
+    # would make `mikke` work here and nowhere else.
     $ModifyPath = -not $env:MIKKE_NO_MODIFY_PATH
     $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if (-not (Test-PathListContains $UserPath $InstallDir)) {
+    $OnUserPath = Test-PathListContains $UserPath $InstallDir
+    $AddedToUserPath = $false
+    if (-not $OnUserPath) {
         if ($ModifyPath) {
-            $EnvKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
-            if ($EnvKey) {
-                try {
-                    $RawUserPath = [string]$EnvKey.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-                    $NewUserPath = if ([string]::IsNullOrWhiteSpace($RawUserPath)) { $InstallDir } else { $RawUserPath.TrimEnd(";") + ";" + $InstallDir }
-                    $EnvKey.SetValue("Path", $NewUserPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
-                }
-                finally { $EnvKey.Close() }
+            # The install itself succeeded; any registry failure (key missing, access denied,
+            # policy) only downgrades to the manual instructions.
+            $EnvKey = $null
+            try {
+                $EnvKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+                if (-not $EnvKey) { throw "HKCU\Environment could not be opened for writing" }
+                $RawUserPath = [string]$EnvKey.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                $NewUserPath = if ([string]::IsNullOrWhiteSpace($RawUserPath)) { $InstallDir } else { $RawUserPath.TrimEnd(";") + ";" + $InstallDir }
+                $EnvKey.SetValue("Path", $NewUserPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+                $AddedToUserPath = $true
+            }
+            catch {
+                Write-Host "note: could not add $InstallDir to the user PATH ($($_.Exception.Message)). Add it with (effective in a new terminal):"
+                Write-Host "  [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';' + '$InstallDir', 'User')"
+            }
+            finally {
+                if ($EnvKey) { $EnvKey.Close() }
+            }
+            if ($AddedToUserPath) {
                 Send-EnvironmentChange
                 Write-Host "note: added $InstallDir to the user PATH (new terminals pick it up)"
-            }
-            else {
-                # The install itself succeeded; do not fail over the PATH convenience.
-                Write-Host "note: could not open HKCU\Environment, so $InstallDir was not added to the user PATH. Add it with (effective in a new terminal):"
-                Write-Host "  [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';' + '$InstallDir', 'User')"
             }
         }
         else {
@@ -230,24 +274,37 @@ try {
             Write-Host "  [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';' + '$InstallDir', 'User')"
         }
     }
-    if ($ModifyPath -and -not (Test-PathListContains $env:Path $InstallDir)) {
+    if ($ModifyPath -and ($OnUserPath -or $AddedToUserPath) -and -not (Test-PathListContains $env:Path $InstallDir)) {
         $env:Path = if ([string]::IsNullOrWhiteSpace($env:Path)) { $InstallDir } else { $env:Path.TrimEnd(";") + ";" + $InstallDir }
     }
 
-    # Check which mikke the current PATH actually resolves to; another copy earlier on PATH
-    # would shadow the one just installed.
+    # Which mikke does this session actually start? Get-Command without a type filter returns
+    # the command that would run: an alias or function beats every file, and among files the
+    # first PATH dir wins, with PATHEXT deciding between mikke.com / mikke.exe / mikke.ps1 in
+    # the same dir. So the comparison is per file, not per directory.
     $ShadowDir = $null
-    $Resolved = Get-Command mikke -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($Resolved) {
-        $ResolvedDir = ConvertTo-NormalizedPath (Split-Path -Parent $Resolved.Source)
-        if (-not ($ResolvedDir -and [StringComparer]::OrdinalIgnoreCase.Equals($ResolvedDir, $InstallDir))) {
-            $ShadowDir = $ResolvedDir
-            $ResolvedVersion = Get-VersionLine $Resolved.Source
+    $Resolved = Get-Command mikke -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $Resolved) {
+        if (Test-PathListContains $env:Path $InstallDir) {
+            Write-Host "note: mikke does not resolve in this session although $InstallDir is on PATH; run $InstalledExe by full path, or open a new terminal"
+        }
+    }
+    elseif (@("Application", "ExternalScript") -contains "$($Resolved.CommandType)") {
+        $ActivePath = ConvertTo-NormalizedPath $Resolved.Source
+        if (-not $ActivePath) { $ActivePath = $Resolved.Source }
+        Write-Host "active: $ActivePath"
+        if (-not [StringComparer]::OrdinalIgnoreCase.Equals($ActivePath, (ConvertTo-NormalizedPath $InstalledExe))) {
+            $ShadowDir = ConvertTo-NormalizedPath (Split-Path -Parent $ActivePath)
+            $ResolvedVersion = Get-VersionLine $ActivePath
             # The shadow's exit code must not become this script's final native exit code.
             $global:LASTEXITCODE = 0
-            Write-Warning "another mikke is found first on PATH: $($Resolved.Source) ($ResolvedVersion)"
-            Write-Warning "remove it, or overwrite it by reinstalling with MIKKE_INSTALL_DIR=$ResolvedDir"
+            Write-Warning "another mikke is found first on PATH: $ActivePath ($ResolvedVersion)"
+            Write-Warning (Get-ShadowAdvice $ActivePath $InstallDir)
         }
+    }
+    else {
+        Write-Host "active: $($Resolved.CommandType) mikke"
+        Write-Warning "mikke is a $($Resolved.CommandType) in this session and takes precedence over $InstalledExe; remove that definition (e.g. Remove-Item Function:mikke or Alias:mikke) or run the exe by full path"
     }
 
     # A copy at the pre-#46 default location is a leftover unless that is where we just installed.

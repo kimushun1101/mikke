@@ -161,24 +161,102 @@ fi
 printf '%s\n' "version: $smoke"
 printf '%s\n' "installed: $INSTALL_DIR/mikke"
 
-case ":$PATH:" in
-  *":$INSTALL_DIR:"*) : ;;
-  *) printf '%s\n' "note: $INSTALL_DIR に PATH が通っていない。shell 設定への追加が必要" ;;
-esac
-
-# PATH 上で実際に解決される mikke が配置先と違えば警告する (別の場所に入れた旧版が
-# 先に見つかり、新版を入れたのに効かない取り違えを防ぐ)。ディレクトリは物理パスに
-# 正規化して比較する (readlink -f は macOS に無いので cd && pwd -P で代用)
-canon() {
+# 物理パスに正規化する。ディレクトリは cd && pwd -P (readlink -f は macOS に無い)、
+# 最終要素の symlink は readlink で辿る (同じ実体を指す別名を別物と誤認しないため)。
+# command -v は PATH に相対要素があると "shadow/mikke" や "./mikke" を返すので、
+# 相対パスは cwd 基準で絶対化する
+abspath() {
   d=$(CDPATH='' cd -- "$(dirname -- "$1")" 2>/dev/null && pwd -P) && printf '%s/%s' "$d" "$(basename -- "$1")"
 }
+canon() {
+  p="$1"
+  n=0
+  while [ -L "$p" ] && [ "$n" -lt 32 ]; do
+    t=$(readlink -- "$p" 2>/dev/null) || break
+    case "$t" in
+      /*) p="$t" ;;
+      *) p="$(dirname -- "$p")/$t" ;;
+    esac
+    n=$((n + 1))
+  done
+  abspath "$p"
+}
+# $1 がディレクトリ $2 の直下にあるか (物理パスで比較。$2 が空・不在なら偽)
+in_dir() {
+  [ -n "$2" ] && d=$(CDPATH='' cd -- "$2" 2>/dev/null && pwd -P) && [ "$(dirname -- "$1")" = "$d" ]
+}
+
+# PATH 上で実際に起動する mikke (active) を示し、配置先と違えば警告する (別の場所に入れた
+# 旧版が先に見つかり、新版を入れたのに効かない取り違えを防ぐ)。上書きや PATH の書き換えは
+# しない — 所有元 (cargo 等) に応じた対処を案内するだけ
+installed_canon=$(canon "$INSTALL_DIR/mikke") || installed_canon="$INSTALL_DIR/mikke"
+active_canon=""
 resolved=$(command -v mikke 2>/dev/null) || resolved=""
 case "$resolved" in
-  /*) ;;
-  *) resolved="" ;;  # 関数・alias 等の非パスは対象外
+  "") ;;
+  */*) ;;
+  # "/" を含まない: 関数・alias・builtin。ただし dash は PATH の空要素 (= cwd) で
+  # 見つけた実行ファイルも裸の名前で返すので、PATH に空要素があり cwd に同名の実行ファイルが
+  # あればそれとみなす (空要素が無ければ関数等が勝つので cwd は見ない)
+  *)
+    case ":$PATH:" in
+      *::*) if [ -x "./$resolved" ] && [ ! -d "./$resolved" ]; then resolved="./$resolved"; fi ;;
+    esac
+    ;;
 esac
-if [ -n "$resolved" ] && [ "$(canon "$resolved")" != "$(canon "$INSTALL_DIR/mikke")" ]; then
-  # stdin を切る (名前だけ同じ別プログラムが入力待ちで止まるのを防ぐ)
-  resolved_version=$("$resolved" --version </dev/null 2>&1 | head -n 1) || :
-  printf '%s\n' "warning: PATH 上では $resolved (${resolved_version:-バージョン不明}) が先に見つかる。それを消すか、MIKKE_INSTALL_DIR=$(dirname "$resolved") で上書きする"
-fi
+case "$resolved" in
+  "") ;;
+  */*)
+    active_abs=$(abspath "$resolved") || active_abs="$resolved"
+    active_canon=$(canon "$resolved") || active_canon="$active_abs"
+    if [ "$active_canon" != "$active_abs" ]; then
+      printf '%s\n' "active: $active_abs (実体: $active_canon)"
+    else
+      printf '%s\n' "active: $active_abs"
+    fi
+    if [ "$active_canon" != "$installed_canon" ]; then
+      # stdin を切る (名前だけ同じ別プログラムが入力待ちで止まるのを防ぐ)
+      active_version=$("$active_abs" --version </dev/null 2>&1 | head -n 1) || :
+      printf '%s\n' "warning: PATH 上では $active_abs (${active_version:-バージョン不明}) が先に見つかるため、配置した $INSTALL_DIR/mikke は使われない"
+      if in_dir "$active_abs" "${CARGO_HOME:+$CARGO_HOME/bin}" || in_dir "$active_abs" "${HOME:+$HOME/.cargo/bin}"; then
+        printf '%s\n' "  これは cargo install で入れた版。cargo 版を使い続けるなら cargo install で更新し、このスクリプトの版へ移るなら先に cargo uninstall mikke で消す"
+      else
+        printf '%s\n' "  所有元 (パッケージマネージャ等) で更新・削除するか、PATH の順序を見直す"
+      fi
+    fi
+    ;;
+  *)
+    printf '%s\n' "warning: mikke は shell の関数/alias/builtin として定義されており ($resolved)、配置した $INSTALL_DIR/mikke より優先される"
+    ;;
+esac
+
+# 配置先が PATH に無ければ shell 別に追加方法を案内する (設定ファイルは自動では変更しない)。
+# symlink 経由で既に配置先が active なら不要
+case ":$PATH:" in
+  *":$INSTALL_DIR:"*) ;;
+  *)
+    if [ "$active_canon" != "$installed_canon" ]; then
+      # $HOME 配下なら設定ファイルに書く 1 行として自然な $HOME 表記にする
+      path_dir="$INSTALL_DIR"
+      if [ -n "${HOME:-}" ]; then
+        case "$INSTALL_DIR" in
+          "$HOME"/*) path_dir="\$HOME/${INSTALL_DIR#"$HOME"/}" ;;
+        esac
+      fi
+      path_line="export PATH=\"$path_dir:\$PATH\""
+      case "$(basename -- "${SHELL:-sh}")" in
+        zsh) rc_file=~/.zshrc ;;
+        bash) if [ "$(uname -s)" = Darwin ]; then rc_file=~/.bash_profile; else rc_file=~/.bashrc; fi ;;
+        fish) rc_file=""; path_line="fish_add_path $path_dir" ;;
+        *) rc_file="shell の設定ファイル (~/.profile 等)" ;;
+      esac
+      if [ -n "$rc_file" ]; then
+        printf '%s\n' "note: $INSTALL_DIR に PATH が通っていない。$rc_file に次の 1 行を追加し、新しいターミナルを開く:"
+      else
+        printf '%s\n' "note: $INSTALL_DIR に PATH が通っていない。fish で次を一度実行する (universal 変数として残る):"
+      fi
+      printf '%s\n' "  $path_line"
+      printf '%s\n' "  今すぐ使うならフルパスで: $INSTALL_DIR/mikke"
+    fi
+    ;;
+esac
