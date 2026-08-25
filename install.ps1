@@ -94,12 +94,14 @@ function Test-PathListContains {
 
 # First line of `<exe> --version`, or a placeholder if it cannot be run. Native stderr under
 # $ErrorActionPreference = Stop would otherwise abort the installer for a broken executable.
+# The output is collected as a whole: stopping the pipeline early (Select-Object -First)
+# can leave the native process with exit code -1 in Windows PowerShell 5.1.
 function Get-VersionLine {
     param([string]$Exe)
 
     $ErrorActionPreference = "Continue"
     try {
-        $Line = @(& $Exe --version 2>&1 | ForEach-Object { "$_" } | Select-Object -First 1)
+        $Line = @(& $Exe --version 2>&1 | ForEach-Object { "$_" })
         if ($Line.Count -gt 0 -and $Line[0]) { return $Line[0] }
         return "no --version output"
     }

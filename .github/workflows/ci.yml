@@ -116,7 +116,8 @@ jobs:
           if ($log -match "another mikke") { throw "unexpected shadowing warning" }
           $resolved = (Get-Command mikke -CommandType Application).Source
           if ($resolved -ne $expectedExe) { throw "Get-Command mikke resolved to $resolved, expected $expectedExe" }
-          $version = (& mikke --version | Select-Object -First 1)
+          # 配列に受ける (| Select-Object -First 1 でパイプラインを早期停止すると native の $LASTEXITCODE が -1 になる競合がある)
+          $version = @(& mikke --version)[0]
           if ($version -notmatch "^mikke 0\.3\.1\b") { throw "unexpected version output: $version" }
       # (b) MIKKE_NO_MODIFY_PATH ではユーザー PATH (レジストリ) を変えず、手動追加の案内を出すこと
       - name: install with MIKKE_NO_MODIFY_PATH (leaves the user PATH alone)
