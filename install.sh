@@ -191,18 +191,19 @@ installed_canon=$(canon "$INSTALL_DIR/mikke") || installed_canon="$INSTALL_DIR/m
 active_canon=""
 active_via_abs=""
 resolved=$(command -v mikke 2>/dev/null) || resolved=""
-case "$resolved" in
-  "") ;;
-  */*) ;;
-  # "/" を含まない: 関数・alias・builtin。ただし dash は PATH の空要素 (= cwd) で
-  # 見つけた実行ファイルも裸の名前で返すので、PATH に空要素があり cwd に同名の実行ファイルが
-  # あればそれとみなす (空要素が無ければ関数等が勝つので cwd は見ない)
-  *)
-    case ":$PATH:" in
-      *::*) if [ -x "./$resolved" ] && [ ! -d "./$resolved" ]; then resolved="./$resolved"; fi ;;
-    esac
-    ;;
-esac
+# 関数・alias・builtin は PATH 検索より常に優先される。command -v は関数でも、dash が PATH の
+# 空要素 (= cwd) で見つけた実行ファイルでも裸の名前 "mikke" を返すので、名前では区別できない。
+# PATH を解決不能にした subshell で command -v がまだ見つけるなら関数等と判定する
+non_file=$( (PATH=/dev/null; command -v mikke) 2>/dev/null ) || non_file=""
+if [ -n "$non_file" ]; then
+  resolved="$non_file"
+else
+  case "$resolved" in
+    ""|*/*) ;;
+    # 裸の名前で関数等でない = dash が PATH の空要素で見つけた cwd の実行ファイル
+    *) if [ -x "./$resolved" ] && [ ! -d "./$resolved" ]; then resolved="./$resolved"; else resolved=""; fi ;;
+  esac
+fi
 case "$resolved" in
   "") ;;
   */*)

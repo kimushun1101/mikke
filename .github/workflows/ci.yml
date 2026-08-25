@@ -336,6 +336,21 @@ jobs:
             exit 1
           fi
           [ ! -e "$RUNNER_TEMP/shadow-was-run" ]
+      # exported な shell 関数と PATH の空要素 (= cwd) が同時にあると command -v はどちらも裸の名前を返す。
+      # 関数が優先される実態どおりに警告し、配置した ./mikke を active: と誤認しないこと
+      - name: run install.sh (関数と PATH 空要素が同時にある場合)
+        run: |
+          mkdir -p "$RUNNER_TEMP/fn-cwd" && cd "$RUNNER_TEMP/fn-cwd"
+          mikke() { printf 'FUNCTION-WINS\n'; }
+          export -f mikke
+          PATH=":$PATH" bash "$GITHUB_WORKSPACE/install.sh" --slim --to . >"$RUNNER_TEMP/fn.log" 2>&1 && rc=0 || rc=$?
+          cat "$RUNNER_TEMP/fn.log"
+          [ "$rc" -eq 0 ]
+          grep -q '関数/alias/builtin' "$RUNNER_TEMP/fn.log"
+          if grep -q '^active:' "$RUNNER_TEMP/fn.log"; then
+            echo "関数が優先されるのに配置したファイルを active: と表示している" >&2
+            exit 1
+          fi
       # 配置先を指す symlink が PATH 上で先に見つかる場合は同じ実体なので、警告も PATH の案内も出さず active: だけ出すこと
       - name: run install.sh (配置先への symlink は警告しない)
         run: |
