@@ -141,6 +141,8 @@ printf '%s\n' "verified: SHA256SUMS OK"
 tar xzf "$tmp/$archive" -C "$tmp" mikke || err "アーカイブの展開に失敗 ($archive)"
 { [ -f "$tmp/mikke" ] && [ ! -L "$tmp/mikke" ]; } || err "アーカイブの内容が想定と異なる (mikke が通常ファイルでない)"
 mkdir -p "$INSTALL_DIR" || err "配置先ディレクトリを作れない: $INSTALL_DIR"
+# 相対指定 (--to relative-bin) でも以降の表示・PATH 案内が cwd に依存しないよう、絶対物理パスにする
+INSTALL_DIR=$(CDPATH='' cd -- "$INSTALL_DIR" && pwd -P) || err "配置先ディレクトリに入れない: $INSTALL_DIR"
 install -m 755 "$tmp/mikke" "$INSTALL_DIR/mikke" || err "配置に失敗: $INSTALL_DIR/mikke"
 [ -f "$INSTALL_DIR/mikke" ] || err "配置後に $INSTALL_DIR/mikke が通常ファイルとして見つからない"
 
@@ -161,7 +163,80 @@ fi
 printf '%s\n' "version: $smoke"
 printf '%s\n' "installed: $INSTALL_DIR/mikke"
 
+# 物理パスに正規化する。ディレクトリは cd && pwd -P (readlink -f は macOS に無い)、
+# 最終要素の symlink は readlink で辿る (同じ実体を指す別名を別物と誤認しないため)。
+# command -v は PATH に相対要素があると "shadow/mikke" や "./mikke" を返すので、
+# 相対パスは cwd 基準で絶対化する
+abspath() {
+  d=$(CDPATH='' cd -- "$(dirname -- "$1")" 2>/dev/null && pwd -P) && printf '%s/%s' "$d" "$(basename -- "$1")"
+}
+canon() {
+  p="$1"
+  n=0
+  while [ -L "$p" ] && [ "$n" -lt 32 ]; do
+    t=$(readlink -- "$p" 2>/dev/null) || break
+    case "$t" in
+      /*) p="$t" ;;
+      *) p="$(dirname -- "$p")/$t" ;;
+    esac
+    n=$((n + 1))
+  done
+  abspath "$p"
+}
+
+# PATH 上で実際に起動する mikke (active) を示し、配置先と違えば警告する (別の場所に入れた
+# 旧版が先に見つかり、新版を入れたのに効かない取り違えを防ぐ)。相手はパスを示すだけで、
+# 実行も上書きも PATH の変更もしない (PATH 上の任意のプログラムを実行すると停止や副作用がありうる)。
+# 対象はこの shell から見える PATH 上のファイルだけ: curl | sh は子 shell で動くので、親 shell の
+# alias や関数はそもそも見えない
+installed_canon=$(canon "$INSTALL_DIR/mikke") || installed_canon="$INSTALL_DIR/mikke"
+active_canon=""
+active_via_abs=""
+resolved=$(command -v mikke 2>/dev/null) || resolved=""
+case "$resolved" in
+  */*) [ -e "$resolved" ] || resolved="" ;;
+  "") ;;
+  *)
+    # dash は PATH の空要素から見つけた外部ファイルも関数等も裸名で返す
+    # shellcheck disable=SC2123
+    if PATH=/dev/null command -v mikke >/dev/null 2>&1; then
+      resolved=""
+    elif [ -x "./$resolved" ] && [ ! -d "./$resolved" ]; then
+      resolved="./$resolved"
+    else
+      resolved=""
+    fi
+    ;;
+esac
+case "$resolved" in
+  */*)
+    # 絶対の PATH 要素で見つかったか (相対要素経由だと cwd を変えた途端に解決できなくなる)
+    case "$resolved" in /*) active_via_abs=1 ;; esac
+    active_abs=$(abspath "$resolved") || active_abs="$resolved"
+    active_canon=$(canon "$resolved") || active_canon="$active_abs"
+    if [ "$active_canon" != "$active_abs" ]; then
+      printf '%s\n' "active: $active_abs (実体: $active_canon)"
+    else
+      printf '%s\n' "active: $active_abs"
+    fi
+    if [ "$active_canon" != "$installed_canon" ]; then
+      printf '%s\n' "warning: PATH 上では $active_abs が先に見つかるため、配置した $INSTALL_DIR/mikke は使われない"
+      printf '%s\n' "  所有元 (cargo 版なら cargo uninstall mikke、パッケージマネージャ等) で更新・削除するか、PATH で $INSTALL_DIR を前に置く。このスクリプトは上書きも PATH の変更もしない"
+    fi
+    ;;
+esac
+
+# 配置先が PATH に無ければ追加方法を案内する (設定ファイルは自動では変更しない)。
+# 絶対の PATH 要素 (symlink 含む) 経由で既に配置先が active なら不要。相対要素経由は
+# この cwd でしか解決できないので案内する
 case ":$PATH:" in
-  *":$INSTALL_DIR:"*) : ;;
-  *) printf '%s\n' "note: $INSTALL_DIR に PATH が通っていない。shell 設定への追加が必要" ;;
+  *":$INSTALL_DIR:"*) ;;
+  *)
+    if [ -z "$active_via_abs" ] || [ "$active_canon" != "$installed_canon" ]; then
+      printf '%s\n' "note: $INSTALL_DIR に PATH が通っていない。shell の設定ファイル (zsh: ~/.zshrc、bash: ~/.bashrc、macOS の bash: ~/.bash_profile) に次の 1 行を追加し、新しいターミナルを開く:"
+      printf '%s\n' "  export PATH=\"$INSTALL_DIR:\$PATH\""
+      printf '%s\n' "  fish なら: fish_add_path \"$INSTALL_DIR\""
+      printf '%s\n' "  今すぐ使うならフルパスで: \"$INSTALL_DIR/mikke\""
+    fi
+    ;;
 esac

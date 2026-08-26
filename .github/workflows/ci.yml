@@ -58,13 +58,17 @@ jobs:
             exit 1
           fi
 
-  # install.ps1 の Windows PowerShell 5.1 (issue #44 の再現環境) での検査。ネットワークは使わない
-  # (MIKKE_VERSION を不正にして最初の検査で throw させる)
+  # install.ps1 の Windows PowerShell 5.1 (issue #44 の再現環境) での検査。
+  # 前半 3 step はネットワークを使わない (MIKKE_VERSION を不正にして最初の検査で throw させる)。
+  # 後半はタグ固定 (MIKKE_VERSION) の実ダウンロード smoke (#46)。latest 解決 (api.github.com) は
+  # 共有 runner での rate limit を避けるため使わない
   install-script-windows:
     runs-on: windows-latest
     defaults:
       run:
         shell: powershell
+    env:
+      SMOKE_VERSION: v0.3.1
     steps:
       - uses: actions/checkout@v7
       # irm | iex 相当: ダウンロード内容は BOM を含んだ文字列のまま iex に渡る (ファイル実行と違い
@@ -88,15 +92,151 @@ jobs:
           $t = $null; $e = $null
           [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$t, [ref]$e) | Out-Null
           if ($e.Count) { $e | ForEach-Object { Write-Error $_.Message }; exit 1 }
+      # (a) 既定配置先 $env:USERPROFILE\.local\bin に入り、ユーザー PATH (レジストリ HKCU) に自動追加され、
+      # 現セッションの $env:Path にも足されて "active:" 行と Get-Command mikke がそこを指すこと。
+      # step ごとにシェルが新規なので $env:Path の追加は step を跨がないが、レジストリの変更は後続 step に残る
+      - name: install to the default dir (adds it to the user PATH)
+        run: |
+          $env:MIKKE_VERSION = $env:SMOKE_VERSION
+          $expectedDir = Join-Path $env:USERPROFILE ".local\bin"
+          $expectedExe = Join-Path $expectedDir "mikke.exe"
+          # runner image が既に ~\.local\bin をユーザー PATH や初期 $env:Path に載せていても「追加」分岐を
+          # 検証できるよう、使い捨て runner のユーザー PATH と現セッションの $env:Path から該当エントリを外しておく
+          $userPath = ([Environment]::GetEnvironmentVariable("Path", "User") -split ";") | Where-Object { $_ -and $_ -ne $expectedDir }
+          [Environment]::SetEnvironmentVariable("Path", ($userPath -join ";"), "User")
+          $env:Path = (($env:Path -split ";") | Where-Object { $_ -and $_ -ne $expectedDir }) -join ";"
+          $log = & "$PWD/install.ps1" *>&1 | ForEach-Object { "$_" }
+          $log
+          if (-not ($log -match "^installed: ")) { throw "no installed: line" }
+          if (-not (Test-Path $expectedExe -PathType Leaf)) { throw "mikke.exe is not at the default location $expectedExe" }
+          if (-not ($log -match "^note: added ")) { throw "no note about adding the install dir to the user PATH" }
+          if (-not (([Environment]::GetEnvironmentVariable("Path", "User") -split ";") -contains $expectedDir)) {
+            throw "$expectedDir was not added to the user PATH (registry)"
+          }
+          if (-not (($env:Path -split ";") -contains $expectedDir)) { throw "$expectedDir was not added to this session's PATH" }
+          if ($log -match "another mikke") { throw "unexpected shadowing warning" }
+          if (-not ($log -contains "active: $expectedExe")) { throw "no active: line pointing at $expectedExe" }
+          $resolved = (Get-Command mikke -CommandType Application).Source
+          if ($resolved -ne $expectedExe) { throw "Get-Command mikke resolved to $resolved, expected $expectedExe" }
+          # 配列に受ける (| Select-Object -First 1 でパイプラインを早期停止すると native の $LASTEXITCODE が -1 になる競合がある)
+          $version = @(& mikke --version)[0]
+          if ($version -notmatch "^mikke 0\.3\.1\b") { throw "unexpected version output: $version" }
+      # (b) MIKKE_NO_MODIFY_PATH ではユーザー PATH (レジストリ) を変えず、手動追加の案内を出すこと
+      - name: install with MIKKE_NO_MODIFY_PATH (leaves the user PATH alone)
+        run: |
+          $env:MIKKE_VERSION = $env:SMOKE_VERSION
+          $env:MIKKE_NO_MODIFY_PATH = "1"
+          $env:MIKKE_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "mikke-optout"
+          $before = [Environment]::GetEnvironmentVariable("Path", "User")
+          $sessionBefore = $env:Path
+          $log = & "$PWD/install.ps1" *>&1 | ForEach-Object { "$_" }
+          $log
+          if (-not ($log -match "^installed: ")) { throw "no installed: line" }
+          if (-not (Test-Path (Join-Path $env:MIKKE_INSTALL_DIR "mikke.exe") -PathType Leaf)) { throw "mikke.exe is not in MIKKE_INSTALL_DIR" }
+          if ([Environment]::GetEnvironmentVariable("Path", "User") -cne $before) { throw "user PATH changed despite MIKKE_NO_MODIFY_PATH" }
+          if ($env:Path -cne $sessionBefore) { throw "session PATH changed despite MIKKE_NO_MODIFY_PATH" }
+          if (-not ($log -match "^note: .*MIKKE_NO_MODIFY_PATH")) { throw "no opt-out note" }
+          if (-not ($log -match "SetEnvironmentVariable")) { throw "no hint on how to add the dir to PATH manually" }
+      # (c) PATH 上に別の mikke ((a) で入れた既定配置先) が先にある状態で別 dir へ入れると、"active:" 行が
+      # その exe を指し、それを名指しする警告が出ること。相手は実行せず、上書きや PATH の並べ替えもしない
+      # (MIKKE_INSTALL_DIR での上書き案内も出さない)
+      - name: install to another dir while a different mikke is first on PATH (warns)
+        run: |
+          $env:MIKKE_VERSION = $env:SMOKE_VERSION
+          $firstDir = Join-Path $env:USERPROFILE ".local\bin"
+          $firstExe = Join-Path $firstDir "mikke.exe"
+          $env:Path = "$firstDir;$env:Path"
+          $env:MIKKE_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "mikke-shadowed"
+          $log = & "$PWD/install.ps1" *>&1 | ForEach-Object { "$_" }
+          $log
+          if (-not ($log -match "^installed: ")) { throw "no installed: line" }
+          if (-not ($log -contains "active: $firstExe")) { throw "no active: line pointing at $firstExe" }
+          $warn = @($log -match "another mikke is found first on PATH")
+          if ($warn.Count -eq 0) { throw "no shadowing warning" }
+          if (-not ($warn -match [regex]::Escape($firstExe))) { throw "warning does not name the resolved path $firstExe" }
+          if ($log -match "MIKKE_INSTALL_DIR=") { throw "must not suggest overwriting the other mikke with MIKKE_INSTALL_DIR" }
+      # (d) 判定はディレクトリでなくファイル単位: PATH 先頭の mikke.ps1 (ExternalScript) と、配置先 dir 内で
+      # PATHEXT 順により .exe に勝つ mikke.com を、それぞれ警告が名指しすること
+      - name: warn about mikke.ps1 on PATH and mikke.com in the install dir (per-file check)
+        run: |
+          $env:MIKKE_VERSION = $env:SMOKE_VERSION
+          $env:MIKKE_NO_MODIFY_PATH = "1"
+          $origPath = $env:Path
+          $realExe = Join-Path $env:USERPROFILE ".local\bin\mikke.exe"
+          # mikke.ps1 が PATH 先頭の dir にある
+          $ps1Dir = Join-Path $env:RUNNER_TEMP "shadow-ps1"
+          New-Item -ItemType Directory -Force $ps1Dir | Out-Null
+          # 実行されないことも確認する (実行されると marker ファイルができる)
+          Set-Content -Path (Join-Path $ps1Dir "mikke.ps1") -Value 'New-Item -ItemType File -Force (Join-Path $env:RUNNER_TEMP "shadow-ps1-was-run") | Out-Null' -Encoding Ascii
+          $env:Path = "$ps1Dir;$origPath"
+          $env:MIKKE_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "mikke-vs-ps1"
+          $log = & "$PWD/install.ps1" *>&1 | ForEach-Object { "$_" }
+          $log
+          if (-not ($log -match "^installed: ")) { throw "no installed: line" }
+          $ps1 = Join-Path $ps1Dir "mikke.ps1"
+          if (-not ($log -contains "active: $ps1")) { throw "no active: line pointing at $ps1" }
+          $warn = @($log -match "another mikke is found first on PATH")
+          if (-not ($warn -match [regex]::Escape($ps1))) { throw "warning does not name $ps1" }
+          if (Test-Path (Join-Path $env:RUNNER_TEMP "shadow-ps1-was-run")) { throw "the shadowing mikke.ps1 was executed" }
+          # mikke.com が配置先 dir にある (MZ 形式の exe は .com 名でも起動する)
+          $comDir = Join-Path $env:RUNNER_TEMP "mikke-vs-com"
+          New-Item -ItemType Directory -Force $comDir | Out-Null
+          $com = Join-Path $comDir "mikke.com"
+          Copy-Item $realExe $com -Force
+          $env:Path = "$comDir;$origPath"
+          $env:MIKKE_INSTALL_DIR = $comDir
+          $log = & "$PWD/install.ps1" *>&1 | ForEach-Object { "$_" }
+          $log
+          if (-not ($log -match "^installed: ")) { throw "no installed: line" }
+          if (-not (Test-Path (Join-Path $comDir "mikke.exe") -PathType Leaf)) { throw "mikke.exe is not in $comDir" }
+          if (-not ($log -contains "active: $com")) { throw "no active: line pointing at $com" }
+          $warn = @($log -match "another mikke is found first on PATH")
+          if (-not ($warn -match [regex]::Escape($com))) { throw "warning does not name $com (same-dir shadow missed)" }
 
-  # 実 Releases に対する smoke (latest 解決込み)。Linux のみ常設し、Windows の実ダウンロード smoke は
-  # api.github.com の共有 runner での rate limit を避けるため常設から外している (変更時に手動確認)
+  # 実 Releases に対する smoke (latest 解決込み)。install.sh の latest 解決は Releases の redirect
+  # (api.github.com を叩かない) なので常設できる。install.ps1 は api.github.com で解決するため、
+  # Windows は共有 runner での rate limit を避けてタグ固定の smoke を install-script-windows に置く
   install-smoke:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - name: run install.sh
-        run: sh install.sh --to "$RUNNER_TEMP/bin"
+        run: |
+          real_tmp=$(cd "$RUNNER_TEMP" && pwd -P)
+          sh install.sh --to "$RUNNER_TEMP/bin" >"$RUNNER_TEMP/plain.log" 2>&1 && rc=0 || rc=$?
+          cat "$RUNNER_TEMP/plain.log"
+          [ "$rc" -eq 0 ]
+          grep -q '^installed:' "$RUNNER_TEMP/plain.log"
+          # 配置先が PATH に無ければ、追記する 1 行とフルパスでの起動を案内すること (配置先は絶対物理パス)
+          grep -qF "  export PATH=\"$real_tmp/bin:\$PATH\"" "$RUNNER_TEMP/plain.log"
+          grep -qF "フルパスで: \"$real_tmp/bin/mikke\"" "$RUNNER_TEMP/plain.log"
+      # --to が相対パスや空白入りでも、表示と PATH 案内は絶対物理パス + quote 付きになること
+      # (相対のまま案内すると別 cwd で開いた shell では違う場所を指す)
+      - name: run install.sh (相対・空白入りの --to)
+        run: |
+          real_tmp=$(cd "$RUNNER_TEMP" && pwd -P)
+          cd "$RUNNER_TEMP"
+          sh "$GITHUB_WORKSPACE/install.sh" --slim --to "rel dir/bin" >"$RUNNER_TEMP/rel-to.log" 2>&1 && rc=0 || rc=$?
+          cat "$RUNNER_TEMP/rel-to.log"
+          [ "$rc" -eq 0 ]
+          grep -qF "installed: $real_tmp/rel dir/bin/mikke" "$RUNNER_TEMP/rel-to.log"
+          grep -qF "  export PATH=\"$real_tmp/rel dir/bin:\$PATH\"" "$RUNNER_TEMP/rel-to.log"
+          grep -qF "  fish なら: fish_add_path \"$real_tmp/rel dir/bin\"" "$RUNNER_TEMP/rel-to.log"
+          if grep -q 'installed: rel dir/' "$RUNNER_TEMP/rel-to.log"; then
+            echo "配置先が相対パスのまま表示されている" >&2
+            exit 1
+          fi
+          # 配置先を指す PATH 要素が相対でも、この cwd でしか解決できないので絶対パスでの追加を案内すること
+          # (active: は出るが警告は出ない)
+          PATH="rel dir/bin:$PATH" sh "$GITHUB_WORKSPACE/install.sh" --slim --to "rel dir/bin" >"$RUNNER_TEMP/rel-path.log" 2>&1 && rc=0 || rc=$?
+          cat "$RUNNER_TEMP/rel-path.log"
+          [ "$rc" -eq 0 ]
+          grep -qF "active: $real_tmp/rel dir/bin/mikke" "$RUNNER_TEMP/rel-path.log"
+          if grep -q '先に見つかる' "$RUNNER_TEMP/rel-path.log"; then
+            echo "配置先そのものを別 mikke として警告している" >&2
+            exit 1
+          fi
+          grep -qF "  export PATH=\"$real_tmp/rel dir/bin:\$PATH\"" "$RUNNER_TEMP/rel-path.log"
       # HOME 未設定 (cron / systemd / コンテナ) でも --to だけで入ること
       - name: run install.sh (slim, HOME 未設定)
         run: env -u HOME sh install.sh --slim --to "$RUNNER_TEMP/bin-slim"
@@ -143,3 +283,103 @@ jobs:
               exit 1
             fi
           done
+      # PATH 上に別の mikke が先にある状態で --to 別 dir へ入れると、実際に起動する方を active: で示し、
+      # 取り違えを警告すること。相手は実行せず (実行されると marker ファイルができる)、上書き (MIKKE_INSTALL_DIR)
+      # も案内しない。照合は pwd -P の物理パス (install.sh の出力に合わせる)
+      - name: run install.sh (PATH 上の別 mikke を警告)
+        run: |
+          real_tmp=$(cd "$RUNNER_TEMP" && pwd -P)
+          mkdir -p "$RUNNER_TEMP/shadow-bin"
+          cat > "$RUNNER_TEMP/shadow-bin/mikke" <<'EOF'
+          #!/bin/sh
+          printf 'mikke 0.0.0 (fake)\n'
+          : > "$RUNNER_TEMP/shadow-was-run"
+          EOF
+          chmod +x "$RUNNER_TEMP/shadow-bin/mikke"
+          PATH="$RUNNER_TEMP/shadow-bin:$PATH" sh install.sh --slim --to "$RUNNER_TEMP/bin-shadow" >"$RUNNER_TEMP/shadow.log" 2>&1 && rc=0 || rc=$?
+          cat "$RUNNER_TEMP/shadow.log"
+          if [ "$rc" -ne 0 ]; then
+            echo "別 mikke が PATH にあるだけで失敗した (exit $rc)" >&2
+            exit 1
+          fi
+          grep -q '^installed:' "$RUNNER_TEMP/shadow.log"
+          grep -qF "active: $real_tmp/shadow-bin/mikke" "$RUNNER_TEMP/shadow.log"
+          if ! grep -q '先に見つかる' "$RUNNER_TEMP/shadow.log"; then
+            echo "PATH 上の別 mikke を警告していない" >&2
+            exit 1
+          fi
+          # 解決先のパスが警告に含まれ、相手を実行せず、上書き案内も出さないこと
+          grep -qF "warning: PATH 上では $real_tmp/shadow-bin/mikke が先に見つかるため" "$RUNNER_TEMP/shadow.log"
+          if [ -e "$RUNNER_TEMP/shadow-was-run" ]; then
+            echo "PATH 上の別 mikke を実行している" >&2
+            exit 1
+          fi
+          if grep -q 'MIKKE_INSTALL_DIR=' "$RUNNER_TEMP/shadow.log"; then
+            echo "別 mikke を MIKKE_INSTALL_DIR で上書きする案内を出している" >&2
+            exit 1
+          fi
+          # 配置先の本物は入っていること
+          "$RUNNER_TEMP/bin-shadow/mikke" --version
+      # PATH に相対要素がある (WSL 等) と command -v は "shadow-bin/mikke" のような相対パスを返す。
+      # それも取りこぼさず、active: と警告は cwd 基準の絶対パスで出すこと
+      - name: run install.sh (相対 PATH 要素の別 mikke を絶対パスで警告)
+        run: |
+          real_tmp=$(cd "$RUNNER_TEMP" && pwd -P)
+          cd "$RUNNER_TEMP"
+          PATH="shadow-bin:$PATH" sh "$GITHUB_WORKSPACE/install.sh" --slim --to "$RUNNER_TEMP/bin-shadow-rel" >"$RUNNER_TEMP/shadow-rel.log" 2>&1 && rc=0 || rc=$?
+          cat "$RUNNER_TEMP/shadow-rel.log"
+          [ "$rc" -eq 0 ]
+          grep -qF "active: $real_tmp/shadow-bin/mikke" "$RUNNER_TEMP/shadow-rel.log"
+          grep -qF "warning: PATH 上では $real_tmp/shadow-bin/mikke が先に見つかるため" "$RUNNER_TEMP/shadow-rel.log"
+          if grep -q 'PATH 上では shadow-bin/mikke' "$RUNNER_TEMP/shadow-rel.log"; then
+            echo "警告が相対パスのまま" >&2
+            exit 1
+          fi
+          [ ! -e "$RUNNER_TEMP/shadow-was-run" ]
+      # dash は PATH の空要素 (= cwd) から見つけた外部ファイルを裸名で返す。
+      # それも ./mikke として解決し、active: と警告は絶対パスで出すこと
+      - name: run install.sh (dash + PATH 空要素の別 mikke を絶対パスで警告)
+        run: |
+          real_tmp=$(cd "$RUNNER_TEMP" && pwd -P)
+          cp "$RUNNER_TEMP/shadow-bin/mikke" "$RUNNER_TEMP/mikke"
+          cd "$RUNNER_TEMP"
+          PATH=":$PATH" dash "$GITHUB_WORKSPACE/install.sh" --slim --to "$RUNNER_TEMP/bin-shadow-empty" >"$RUNNER_TEMP/shadow-empty.log" 2>&1 && rc=0 || rc=$?
+          cat "$RUNNER_TEMP/shadow-empty.log"
+          [ "$rc" -eq 0 ]
+          grep -qF "active: $real_tmp/mikke" "$RUNNER_TEMP/shadow-empty.log"
+          grep -qF "warning: PATH 上では $real_tmp/mikke が先に見つかるため" "$RUNNER_TEMP/shadow-empty.log"
+          [ ! -e "$RUNNER_TEMP/shadow-was-run" ]
+      # installer の shell に alias があっても (command -v の出力 "alias mikke='/…'" は / を含む)、
+      # ファイルと誤分類して active: や警告に出さないこと。alias/関数の扱いはスクリプトの範囲外
+      - name: run install.sh (alias をファイルと誤分類しない)
+        run: |
+          printf "shopt -s expand_aliases\nalias mikke='/opt/legacy/mikke'\n" > "$RUNNER_TEMP/bashenv"
+          if ! BASH_ENV="$RUNNER_TEMP/bashenv" bash -c 'command -v mikke' | grep -q '^alias mikke='; then
+            echo "BASH_ENV の alias が command -v mikke から見えていない" >&2
+            exit 1
+          fi
+          BASH_ENV="$RUNNER_TEMP/bashenv" bash install.sh --slim --to "$RUNNER_TEMP/bin-alias" >"$RUNNER_TEMP/alias.log" 2>&1 && rc=0 || rc=$?
+          cat "$RUNNER_TEMP/alias.log"
+          [ "$rc" -eq 0 ]
+          if grep -q 'alias mikke' "$RUNNER_TEMP/alias.log"; then
+            echo "alias 定義を active: や警告に出している" >&2
+            exit 1
+          fi
+      # 配置先を指す symlink が PATH 上で先に見つかる場合は同じ実体なので、警告も PATH の案内も出さず active: だけ出すこと
+      - name: run install.sh (配置先への symlink は警告しない)
+        run: |
+          real_tmp=$(cd "$RUNNER_TEMP" && pwd -P)
+          mkdir -p "$RUNNER_TEMP/link-bin" "$RUNNER_TEMP/bin-target"
+          ln -s "$RUNNER_TEMP/bin-target/mikke" "$RUNNER_TEMP/link-bin/mikke"
+          PATH="$RUNNER_TEMP/link-bin:$PATH" sh install.sh --slim --to "$RUNNER_TEMP/bin-target" >"$RUNNER_TEMP/symlink.log" 2>&1 && rc=0 || rc=$?
+          cat "$RUNNER_TEMP/symlink.log"
+          [ "$rc" -eq 0 ]
+          grep -qF "active: $real_tmp/link-bin/mikke" "$RUNNER_TEMP/symlink.log"
+          if grep -q '先に見つかる' "$RUNNER_TEMP/symlink.log"; then
+            echo "同じ実体への symlink を別物として警告している" >&2
+            exit 1
+          fi
+          if grep -q '^note:' "$RUNNER_TEMP/symlink.log"; then
+            echo "symlink 経由で既に起動できるのに PATH の追加を案内している" >&2
+            exit 1
+          fi
