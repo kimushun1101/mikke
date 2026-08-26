@@ -188,16 +188,25 @@ canon() {
 # 旧版が先に見つかり、新版を入れたのに効かない取り違えを防ぐ)。相手はパスを示すだけで、
 # 実行も上書きも PATH の変更もしない (PATH 上の任意のプログラムを実行すると停止や副作用がありうる)。
 # 対象はこの shell から見える PATH 上のファイルだけ: curl | sh は子 shell で動くので、親 shell の
-# alias や関数はそもそも見えない (command -v が裸の名前を返すものは扱わない。docs で
-# 「実際に起動するものは自分の shell で command -v mikke」と案内する)
+# alias や関数はそもそも見えない
 installed_canon=$(canon "$INSTALL_DIR/mikke") || installed_canon="$INSTALL_DIR/mikke"
 active_canon=""
 active_via_abs=""
 resolved=$(command -v mikke 2>/dev/null) || resolved=""
-# alias の出力 (alias mikke='/opt/x') も "/" を含みうるので、cwd から実在するパスだけをファイルとみなす
 case "$resolved" in
   */*) [ -e "$resolved" ] || resolved="" ;;
-  *) resolved="" ;;
+  "") ;;
+  *)
+    # dash は PATH の空要素から見つけた外部ファイルも関数等も裸名で返す
+    # shellcheck disable=SC2123
+    if PATH=/dev/null command -v mikke >/dev/null 2>&1; then
+      resolved=""
+    elif [ -x "./$resolved" ] && [ ! -d "./$resolved" ]; then
+      resolved="./$resolved"
+    else
+      resolved=""
+    fi
+    ;;
 esac
 case "$resolved" in
   */*)

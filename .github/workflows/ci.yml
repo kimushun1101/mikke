@@ -336,11 +336,28 @@ jobs:
             exit 1
           fi
           [ ! -e "$RUNNER_TEMP/shadow-was-run" ]
+      # dash は PATH の空要素 (= cwd) から見つけた外部ファイルを裸名で返す。
+      # それも ./mikke として解決し、active: と警告は絶対パスで出すこと
+      - name: run install.sh (dash + PATH 空要素の別 mikke を絶対パスで警告)
+        run: |
+          real_tmp=$(cd "$RUNNER_TEMP" && pwd -P)
+          cp "$RUNNER_TEMP/shadow-bin/mikke" "$RUNNER_TEMP/mikke"
+          cd "$RUNNER_TEMP"
+          PATH=":$PATH" dash "$GITHUB_WORKSPACE/install.sh" --slim --to "$RUNNER_TEMP/bin-shadow-empty" >"$RUNNER_TEMP/shadow-empty.log" 2>&1 && rc=0 || rc=$?
+          cat "$RUNNER_TEMP/shadow-empty.log"
+          [ "$rc" -eq 0 ]
+          grep -qF "active: $real_tmp/mikke" "$RUNNER_TEMP/shadow-empty.log"
+          grep -qF "warning: PATH 上では $real_tmp/mikke が先に見つかるため" "$RUNNER_TEMP/shadow-empty.log"
+          [ ! -e "$RUNNER_TEMP/shadow-was-run" ]
       # installer の shell に alias があっても (command -v の出力 "alias mikke='/…'" は / を含む)、
       # ファイルと誤分類して active: や警告に出さないこと。alias/関数の扱いはスクリプトの範囲外
       - name: run install.sh (alias をファイルと誤分類しない)
         run: |
-          printf "alias mikke='/opt/legacy/mikke'\n" > "$RUNNER_TEMP/bashenv"
+          printf "shopt -s expand_aliases\nalias mikke='/opt/legacy/mikke'\n" > "$RUNNER_TEMP/bashenv"
+          if ! BASH_ENV="$RUNNER_TEMP/bashenv" bash -c 'command -v mikke' | grep -q '^alias mikke='; then
+            echo "BASH_ENV の alias が command -v mikke から見えていない" >&2
+            exit 1
+          fi
           BASH_ENV="$RUNNER_TEMP/bashenv" bash install.sh --slim --to "$RUNNER_TEMP/bin-alias" >"$RUNNER_TEMP/alias.log" 2>&1 && rc=0 || rc=$?
           cat "$RUNNER_TEMP/alias.log"
           [ "$rc" -eq 0 ]
