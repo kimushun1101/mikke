@@ -186,28 +186,20 @@ canon() {
 
 # PATH 上で実際に起動する mikke (active) を示し、配置先と違えば警告する (別の場所に入れた
 # 旧版が先に見つかり、新版を入れたのに効かない取り違えを防ぐ)。相手はパスを示すだけで、
-# 実行も上書きも PATH の変更もしない (PATH 上の任意のプログラムを実行すると停止や副作用がありうる)
+# 実行も上書きも PATH の変更もしない (PATH 上の任意のプログラムを実行すると停止や副作用がありうる)。
+# 対象はこの shell から見える PATH 上のファイルだけ: curl | sh は子 shell で動くので、親 shell の
+# alias や関数はそもそも見えない (command -v が裸の名前を返すものは扱わない。docs で
+# 「実際に起動するものは自分の shell で command -v mikke」と案内する)
 installed_canon=$(canon "$INSTALL_DIR/mikke") || installed_canon="$INSTALL_DIR/mikke"
 active_canon=""
 active_via_abs=""
 resolved=$(command -v mikke 2>/dev/null) || resolved=""
-# 関数・alias・builtin は PATH 検索より常に優先される。command -v は関数でも、dash が PATH の
-# 空要素 (= cwd) で見つけた実行ファイルでも裸の名前 "mikke" を返すので、名前では区別できない。
-# PATH を解決不能にした subshell で command -v がまだ見つけるなら関数等と判定する
-# (subshell 内の PATH 変更は意図的で、外には漏れない)
-# shellcheck disable=SC2123,SC2030,SC2031
-non_file=$( (PATH=/dev/null; command -v mikke) 2>/dev/null ) || non_file=""
-if [ -n "$non_file" ]; then
-  resolved="$non_file"
-else
-  case "$resolved" in
-    ""|*/*) ;;
-    # 裸の名前で関数等でない = dash が PATH の空要素で見つけた cwd の実行ファイル
-    *) if [ -x "./$resolved" ] && [ ! -d "./$resolved" ]; then resolved="./$resolved"; else resolved=""; fi ;;
-  esac
-fi
+# alias の出力 (alias mikke='/opt/x') も "/" を含みうるので、cwd から実在するパスだけをファイルとみなす
 case "$resolved" in
-  "") ;;
+  */*) [ -e "$resolved" ] || resolved="" ;;
+  *) resolved="" ;;
+esac
+case "$resolved" in
   */*)
     # 絶対の PATH 要素で見つかったか (相対要素経由だと cwd を変えた途端に解決できなくなる)
     case "$resolved" in /*) active_via_abs=1 ;; esac
@@ -223,15 +215,11 @@ case "$resolved" in
       printf '%s\n' "  所有元 (cargo 版なら cargo uninstall mikke、パッケージマネージャ等) で更新・削除するか、PATH で $INSTALL_DIR を前に置く。このスクリプトは上書きも PATH の変更もしない"
     fi
     ;;
-  *)
-    printf '%s\n' "warning: mikke は shell の関数/alias/builtin として定義されており ($resolved)、配置した $INSTALL_DIR/mikke より優先される"
-    ;;
 esac
 
 # 配置先が PATH に無ければ追加方法を案内する (設定ファイルは自動では変更しない)。
 # 絶対の PATH 要素 (symlink 含む) 経由で既に配置先が active なら不要。相対要素経由は
 # この cwd でしか解決できないので案内する
-# shellcheck disable=SC2031
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *)

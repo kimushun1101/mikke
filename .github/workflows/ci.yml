@@ -336,19 +336,16 @@ jobs:
             exit 1
           fi
           [ ! -e "$RUNNER_TEMP/shadow-was-run" ]
-      # exported な shell 関数と PATH の空要素 (= cwd) が同時にあると command -v はどちらも裸の名前を返す。
-      # 関数が優先される実態どおりに警告し、配置した ./mikke を active: と誤認しないこと
-      - name: run install.sh (関数と PATH 空要素が同時にある場合)
+      # installer の shell に alias があっても (command -v の出力 "alias mikke='/…'" は / を含む)、
+      # ファイルと誤分類して active: や警告に出さないこと。alias/関数の扱いはスクリプトの範囲外
+      - name: run install.sh (alias をファイルと誤分類しない)
         run: |
-          mkdir -p "$RUNNER_TEMP/fn-cwd" && cd "$RUNNER_TEMP/fn-cwd"
-          mikke() { printf 'FUNCTION-WINS\n'; }
-          export -f mikke
-          PATH=":$PATH" bash "$GITHUB_WORKSPACE/install.sh" --slim --to . >"$RUNNER_TEMP/fn.log" 2>&1 && rc=0 || rc=$?
-          cat "$RUNNER_TEMP/fn.log"
+          printf "alias mikke='/opt/legacy/mikke'\n" > "$RUNNER_TEMP/bashenv"
+          BASH_ENV="$RUNNER_TEMP/bashenv" bash install.sh --slim --to "$RUNNER_TEMP/bin-alias" >"$RUNNER_TEMP/alias.log" 2>&1 && rc=0 || rc=$?
+          cat "$RUNNER_TEMP/alias.log"
           [ "$rc" -eq 0 ]
-          grep -q '関数/alias/builtin' "$RUNNER_TEMP/fn.log"
-          if grep -q '^active:' "$RUNNER_TEMP/fn.log"; then
-            echo "関数が優先されるのに配置したファイルを active: と表示している" >&2
+          if grep -q 'alias mikke' "$RUNNER_TEMP/alias.log"; then
+            echo "alias 定義を active: や警告に出している" >&2
             exit 1
           fi
       # 配置先を指す symlink が PATH 上で先に見つかる場合は同じ実体なので、警告も PATH の案内も出さず active: だけ出すこと
