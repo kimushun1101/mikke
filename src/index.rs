@@ -8,7 +8,8 @@
 //!   notes_fts USING fts5(path UNINDEXED, title, content, tokenize='trigram')
 //!   meta(key PK, value)   -- meta['generated'] に生成時刻 (health 鮮度判定 +
 //!                            auto_rebuild の stale 判定)、meta['scanned_paths_sha256'] に
-//!                            走査 path 集合のスナップショット (auto_rebuild の stale 判定)
+//!                            走査 path 集合のスナップショット、meta['index_format'] に
+//!                            索引形式 (いずれも auto_rebuild の stale 判定)
 //!
 //! meta['generated'] は epoch 秒 (ナノ秒精度の小数文字列) で保存する。
 //! 秒精度だと mtime (小数秒) との比較で秒未満の更新を取りこぼすため
@@ -17,6 +18,7 @@
 #![allow(dead_code)]
 
 use crate::config::{to_posix, Config};
+use crate::normalize::normalize_search_text;
 use crate::scan;
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
@@ -81,6 +83,8 @@ const SCHEMA: &str = "
 
 /// 走査 path 集合のスナップショットを保存する meta キー。
 const META_SCANNED_PATHS: &str = "scanned_paths_sha256";
+const META_INDEX_FORMAT: &str = "index_format";
+const INDEX_FORMAT: &str = "1";
 
 /// 走査 path 集合 (root 相対 posix) のスナップショット: ソート済リストの SHA-256。
 /// mtime が保存される移動・リネームや追加・削除を auto_rebuild の stale 判定で検知する。
@@ -182,9 +186,11 @@ pub fn build_to(cfg: &Config, use_stderr: bool) -> BuildIssues {
             )
             .expect("links への INSERT に失敗");
         }
+        let fts_title = normalize_search_text(&note.title);
+        let fts_content = normalize_search_text(&note.content);
         conn.execute(
             "INSERT INTO notes_fts (path, title, content) VALUES (?1, ?2, ?3)",
-            params![note.path_rel, note.title, note.content],
+            params![note.path_rel, fts_title, fts_content],
         )
         .expect("notes_fts への INSERT に失敗");
 
@@ -204,6 +210,11 @@ pub fn build_to(cfg: &Config, use_stderr: bool) -> BuildIssues {
     conn.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2)",
         params![META_SCANNED_PATHS, scanned_paths_hash(&scanned_paths)],
+    )
+    .expect("meta への INSERT に失敗");
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        params![META_INDEX_FORMAT, INDEX_FORMAT],
     )
     .expect("meta への INSERT に失敗");
 
@@ -258,8 +269,8 @@ pub fn cmd_index(cfg: &Config, check: bool) {
 }
 
 /// 既存 index が stale かを短命 Connection で判定する (auto_rebuild 用)。
-/// stale 条件: meta['generated'] / スナップショットが無い旧形式、いずれかの md の
-/// mtime > generated、走査 path 集合のハッシュがスナップショットと不一致。
+/// stale 条件: index format 不一致、meta['generated'] / スナップショット欠落、いずれかの
+/// md の mtime > generated、走査 path 集合のハッシュがスナップショットと不一致。
 fn index_is_stale(cfg: &Config) -> bool {
     let conn = match Connection::open(cfg.index_path()) {
         Ok(c) => c,
@@ -271,6 +282,9 @@ fn index_is_stale(cfg: &Config) -> bool {
         })
         .ok()
     };
+    if meta(META_INDEX_FORMAT).as_deref() != Some(INDEX_FORMAT) {
+        return true;
+    }
     // meta['generated'] が無い旧形式 index は stale 扱い
     let Some(generated) = meta("generated").and_then(|v| v.parse::<f64>().ok()) else {
         return true;
