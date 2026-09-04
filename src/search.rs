@@ -5,7 +5,7 @@
 //! trigram 制約: 各語 3 文字以上なら `ORDER BY rank` (FTS5 BM25)。1 語でも <3 文字を含めば
 //!   LIKE フォールバック (全語 AND で LOWER(content/title) LIKE %term%、date 降順、relevance 無し)。
 //! find の見出し: 順序を正直に表示。bm25_limit 到達時は打ち切りを明示。
-//! tag/title: 正規化 keyword の LOWER(...) LIKE %kw% 部分一致、date 降順。
+//! tag/title: trim + 正規化した keyword の LOWER(...) LIKE %kw% 部分一致、date 降順。
 //! recent: date!='' を date 降順 LIMIT。
 //! list-tags: GROUP BY tag ORDER BY COUNT(*) DESC, tag。
 //! hybrid RRF: 各ストリーム top_n*candidate_factor → rank 1 始まり → score += w * 1/(rrf_k+rank)。
@@ -226,7 +226,7 @@ pub fn cmd_tag(cfg: &Config, keyword: &str, json: bool) -> usize {
          FROM tags t JOIN notes n ON t.path = n.path
          WHERE LOWER(t.tag) LIKE ?1
          ORDER BY n.date DESC",
-        &format!("%{}%", normalize_search_text(keyword).to_lowercase()),
+        &format!("%{}%", normalize_search_text(keyword.trim()).to_lowercase()),
     );
     if paths.is_empty() {
         // 0 件 early-return 経路。JSON でもメタ行は必ず出す (exit code は main 側で 1)。
@@ -255,7 +255,7 @@ pub fn cmd_title(cfg: &Config, keyword: &str, json: bool) -> usize {
          FROM notes_fts f JOIN notes n ON f.path = n.path
          WHERE LOWER(f.title) LIKE ?1
          ORDER BY n.date DESC",
-        &format!("%{}%", normalize_search_text(keyword).to_lowercase()),
+        &format!("%{}%", normalize_search_text(keyword.trim()).to_lowercase()),
     );
     let notes = fetch_notes(&conn, &paths);
     if json {

@@ -125,7 +125,13 @@ fn japanese_spacing_searches_are_symmetric() {
         );
     }
 
-    for query in ["スペースあり", "スペース あり"] {
+    // 末尾空白付きは trim 後に正規化する (索引側で空白が消えているため trim しないと落ちる)。
+    for query in [
+        "スペースあり",
+        "スペース あり",
+        "スペース ",
+        " スペース あり ",
+    ] {
         let out = run_raw(&root, &["title", query]);
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
