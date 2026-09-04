@@ -111,19 +111,20 @@ notes_fts USING fts5(path UNINDEXED, title, content, tokenize='trigram')
 meta(key PRIMARY KEY, value)     -- meta['generated'] に index 生成時刻 (health の鮮度判定と
                                  -- auto_rebuild の stale 判定に使用)。meta['scanned_paths_sha256'] に
                                  -- 走査 path 集合 (root 相対、ソート済リスト) の SHA-256
-                                 -- (auto_rebuild の stale 判定に使用)
+                                 -- (auto_rebuild の stale 判定に使用)、meta['index_format'] に索引形式
 ```
 
-index が無い場合は検索時に自動 build(clone 直後フォールバック)。`mikke index` は drop→再作成の全再構築。`meta['generated']` は epoch 秒の小数文字列(秒精度だと mtime との比較で秒未満の更新を取りこぼすため)。index フォーマットは内部表現であり互換保証しない(`.mikke/` は常に再生成可能)。
+index が無い場合は検索時に自動 build(clone 直後フォールバック)。`mikke index` は drop→再作成の全再構築。`notes` / `tags` / `links` と `summary` / `word_count` は原文由来の値を保ち、`notes_fts.title` / `notes_fts.content` だけ検索用に和欧間スペースを正規化する。正規化は U+0020 1 個の両隣が非 whitespace かつ少なくとも片側が和文クラスの場合にその空白を削除する(和文クラスは U+3001–U+303F、U+3040–U+30FF、U+31F0–U+31FF、U+3400–U+4DBF、U+4E00–U+9FFF、U+F900–U+FAFF、U+FF00–U+FFEF)。全角スペース・連続空白・行頭行末・タブ・NBSP は保存し、正規化は冪等。`meta['generated']` は epoch 秒の小数文字列(秒精度だと mtime との比較で秒未満の更新を取りこぼすため)。index フォーマットは内部表現であり互換保証しない(`.mikke/` は常に再生成可能)。
 
-**自動再構築(`[index] auto_rebuild = true`、既定 false)**: 検索系コマンド(find / tag / title / semantic / hybrid / list-tags / recent / links / backlinks)の index 準備経路でのみ鮮度を判定し、stale なら stderr へ告知して全再構築してから検索する(stdout の出力フォーマットは変えない)。`health` はこの判定を通らない(再構築すると index 鮮度診断がマスクされるため。index 不存在時の自動 build は従来どおり)。stale 判定は次のいずれか: (a) いずれかの md の mtime が `meta['generated']` より新しい、(b) 走査 path 集合の SHA-256 が `meta['scanned_paths_sha256']` と不一致(mtime が保存される移動・リネームや追加・削除も検知)、(c) これらの meta キーが無い旧形式 index。走査 md 件数と notes 行数の比較は行わない(frontmatter 破損で index から除外されるファイルがあると恒常 stale 化するため、スナップショットは破損分も含む走査 path 全体で取る)。対象は BM25 index のみで embeddings は対象外(semantic 側の鮮度は `mikke embed` の差分更新に委ねる)。限界と副作用: mtime を保存する copy(rsync -t 等)による内容変更は検知できない。有効時は検索のたびに全 md 走査 + metadata 取得のコストがかかり、ネスト repo の設定が壊れている場合は検索コマンド自体が path 付きで即エラー終了するようになる(fail-loud 方針と整合)。また、開けない・meta を読めない破損 index も stale 扱い(後者は (c) の旧形式と同じ判定)となり、有効時は自動で再構築される(無効時は従来どおり接続エラーで終了する)。
+**自動再構築(`[index] auto_rebuild = true`、既定 false)**: 検索系コマンド(find / tag / title / semantic / hybrid / list-tags / recent / links / backlinks)の index 準備経路でのみ鮮度を判定し、stale なら stderr へ告知して全再構築してから検索する(stdout の出力フォーマットは変えない)。`health` はこの判定を通らない(再構築すると index 鮮度診断がマスクされるため。index 不存在時の自動 build は従来どおり)。stale 判定は次のいずれか: (a) `meta['index_format']` が現行値と不一致または欠落、(b) いずれかの md の mtime が `meta['generated']` より新しい、(c) 走査 path 集合の SHA-256 が `meta['scanned_paths_sha256']` と不一致(mtime が保存される移動・リネームや追加・削除も検知)、(d) generated または path 集合の meta キーが無い旧形式 index。走査 md 件数と notes 行数の比較は行わない(frontmatter 破損で index から除外されるファイルがあると恒常 stale 化するため、スナップショットは破損分も含む走査 path 全体で取る)。対象は BM25 index のみで embeddings は対象外(semantic 側の鮮度は `mikke embed` の差分更新に委ねる)。限界と副作用: mtime を保存する copy(rsync -t 等)による内容変更は検知できない。有効時は検索のたびに全 md 走査 + metadata 取得のコストがかかり、ネスト repo の設定が壊れている場合は検索コマンド自体が path 付きで即エラー終了するようになる(fail-loud 方針と整合)。また、開けない・meta を読めない破損 index も stale 扱い(後者は旧形式と同じ判定)となり、有効時は自動で再構築される(無効時は従来どおり接続エラーで終了する)。
 
 ## 検索セマンティクス
 
 - **FTS 変換 (`fts_query`)**: 空白で語分割し、各語を個別に `"..."` quote して `AND` 連結。入力全体を 1 つの quote で囲むと連続一致要求で 0 件化するため**語ごと quote が必須**。内部の `"` は `""` にエスケープ。
+- **和欧間スペース**: `find` はクエリを正規化せず、空白入りクエリの AND 意味論と語長による MATCH / LIKE 選択を維持する。`title` は正規化済み `notes_fts.title` に対してキーワード全体を同じ規則で正規化して LIKE 検索し、`tag` は格納値を表示用に保ったままキーワード側だけ正規化する。
 - **trigram 制約**: FTS5 trigram は各語 3 文字以上必須。**語ごとに**長さ判定し、1 語でも 3 文字未満を含む場合は LIKE フォールバック(全語 AND、`LOWER(content/title) LIKE %term%`、date 降順、relevance 無し)。全語 3 文字以上なら `ORDER BY rank`(FTS5 の BM25)。
 - **find の順序表示**: BM25 順か「date 降順(短語で relevance 算出不可)」かを**正直に出す**。`bm25_limit` 到達時は「上位 N 件で打ち切り(全ヒット数不明)」と明示(打ち切りを全件数と誤読させない)。
-- **tag/title**: `LOWER(...) LIKE %kw%` 部分一致、date 降順。
+- **tag/title**: 正規化したキーワードによる `LOWER(...) LIKE %kw%` 部分一致、date 降順。
 - **recent**: `date != ''` を date 降順で LIMIT。
 - **list-tags**: `GROUP BY tag ORDER BY COUNT(*) DESC, tag`。
 - **semantic**: クエリを `query_prefix + query` で encode(normalize)、保存ベクトルとの内積(= 正規化済 cosine)で降順 top_n。**モデル/prefix は保存 metadata を優先**(生成時とエンコード条件を揃える)。

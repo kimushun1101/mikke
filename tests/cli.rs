@@ -8,6 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rusqlite::Connection;
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_mikke")
 }
@@ -88,6 +90,136 @@ fn run_raw(root: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .output()
         .expect("failed to run mikke")
+}
+
+/// 和欧間スペースの有無を索引側で吸収し、原文テーブルと表示は維持する。
+#[test]
+fn japanese_spacing_searches_are_symmetric() {
+    let root = temp_repo(
+        "japanese-spacing",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            (
+                "notes/nospace.md",
+                "---\ntitle: 比較用ノート\nsummary: 要約 は原文\ntags: [組版]\n---\n\nTypstは組版システムです。LaTeXよりも高速です。バージョンは0.13です。[[リンク 先]]\n",
+            ),
+            (
+                "notes/withspace.md",
+                "---\ntitle: スペース あり\nsummary: 空白 入りの要約\ntags: [組版]\n---\n\nTypst は組版システムです。LaTeX よりも高速です。バージョンは 0.13 です。\n",
+            ),
+        ],
+    );
+    run(&root, &["index"]);
+
+    for query in ["Typstは", "Typst は", "LaTeXよりも", "バージョンは0.13"] {
+        let args = ["find", query];
+        let out = run_raw(&root, &args);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success()
+                && stdout.contains("notes/nospace.md")
+                && stdout.contains("notes/withspace.md")
+                && stdout.contains("結果 (2件"),
+            "'{query}' が両方の表記に一致しない:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    for query in ["スペースあり", "スペース あり"] {
+        let out = run_raw(&root, &["title", query]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success()
+                && stdout.contains("結果 (1件)")
+                && stdout.contains("スペース あり"),
+            "title '{query}' が原文 title の 1 件に一致しない:\n{stdout}"
+        );
+    }
+
+    let conn = Connection::open(root.join(".mikke/index.sqlite")).unwrap();
+    let note: (String, String) = conn
+        .query_row(
+            "SELECT title, summary FROM notes WHERE path = 'notes/withspace.md'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    let fts_title: String = conn
+        .query_row(
+            "SELECT title FROM notes_fts WHERE path = 'notes/withspace.md'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let link: String = conn
+        .query_row(
+            "SELECT target FROM links WHERE path = 'notes/nospace.md'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(note, ("スペース あり".into(), "空白 入りの要約".into()));
+    assert_eq!(fts_title, "スペースあり");
+    assert_eq!(link, "リンク 先");
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// find の空白は従来どおり AND であり、連続フレーズへ融合しない。
+#[test]
+fn find_preserves_and_semantics_and_english_spaces() {
+    let root = temp_repo(
+        "spacing-semantics",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            (
+                "notes/apart.md",
+                "# 離れた語\n\nLaTeX の概要を説明する。別の段落では従来方式よりも高速と評価した。\n",
+            ),
+            (
+                "notes/english.md",
+                "# English\n\nhello world are two words.\n",
+            ),
+        ],
+    );
+    run(&root, &["index"]);
+
+    let spaced = run_raw(&root, &["find", "LaTeX よりも高速"]);
+    let compact = run_raw(&root, &["find", "LaTeXよりも高速"]);
+    let english = run_raw(&root, &["find", "helloworld"]);
+    assert!(
+        spaced.status.success()
+            && String::from_utf8_lossy(&spaced.stdout).contains("notes/apart.md"),
+        "離れた 2 語の AND 検索がヒットしない:\n{}",
+        String::from_utf8_lossy(&spaced.stdout)
+    );
+    assert_eq!(compact.status.code(), Some(1));
+    assert_eq!(english.status.code(), Some(1));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// tag は格納値を変えず、検索キーワードだけを和欧間スペース正規化する。
+#[test]
+fn tag_normalizes_only_keyword() {
+    let root = temp_repo(
+        "tag-spacing",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            (
+                "notes/tag.md",
+                "---\ntitle: Tag\ntags: [設計foo]\n---\n\n本文。\n",
+            ),
+        ],
+    );
+    run(&root, &["index"]);
+    let out = run_raw(&root, &["tag", "設計 foo"]);
+    let tags = run_raw(&root, &["list-tags"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("notes/tag.md"));
+    assert!(String::from_utf8_lossy(&tags.stdout).contains("設計foo (1件)"));
+
+    let _ = fs::remove_dir_all(&root);
 }
 
 /// manifest.tsv の各コマンド出力を golden と比較。
@@ -490,6 +622,58 @@ fn auto_rebuild_default_off_keeps_old_index() {
         !stderr.contains("再構築"),
         "既定なのに再構築の告知が出ている:\n{stderr}"
     );
+}
+
+/// index_format が無い旧索引は auto_rebuild 有効時だけ再構築する。
+#[test]
+fn old_index_format_respects_auto_rebuild_setting() {
+    for (tag, auto_rebuild, expected_status) in [("on", true, 0), ("off", false, 1)] {
+        let config = format!("[index]\nauto_rebuild = {auto_rebuild}\n");
+        let root = temp_repo(
+            &format!("old-format-{tag}"),
+            &[
+                ("mikke.toml", &config),
+                ("a.md", "# A\n\nTypst は組版システムです。\n"),
+            ],
+        );
+        run(&root, &["index"]);
+
+        let conn = Connection::open(root.join(".mikke/index.sqlite")).unwrap();
+        conn.execute("DELETE FROM meta WHERE key = 'index_format'", [])
+            .unwrap();
+        conn.execute("DELETE FROM notes_fts", []).unwrap();
+        conn.execute(
+            "INSERT INTO notes_fts (path, title, content) VALUES ('a.md', 'A', 'Typst は組版システムです。')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let out = run_raw(&root, &["find", "Typstは"]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(expected_status),
+            "auto_rebuild={auto_rebuild} の旧索引検索:\n{stdout}\n{stderr}"
+        );
+        assert_eq!(
+            stderr.contains("再構築"),
+            auto_rebuild,
+            "auto_rebuild={auto_rebuild} の再構築告知:\n{stderr}"
+        );
+
+        let conn = Connection::open(root.join(".mikke/index.sqlite")).unwrap();
+        let format: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'index_format'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        assert_eq!(format.as_deref(), auto_rebuild.then_some("1"));
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 // --- version (slim/full 判別) ---

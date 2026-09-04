@@ -1,10 +1,12 @@
 //! 検索コマンド群 (find / tag / title / semantic / hybrid / list-tags / recent / links / backlinks)。
 //!
 //! FTS 変換 (fts_query): 空白で語分割 → 各語を個別に `"..."` quote (内部 " は "") → AND 連結。
+//! find のクエリは AND 意味論と MATCH/LIKE 経路を保つため正規化しない。
 //! trigram 制約: 各語 3 文字以上なら `ORDER BY rank` (FTS5 BM25)。1 語でも <3 文字を含めば
 //!   LIKE フォールバック (全語 AND で LOWER(content/title) LIKE %term%、date 降順、relevance 無し)。
 //! find の見出し: 順序を正直に表示。bm25_limit 到達時は打ち切りを明示。
-//! tag/title: LOWER(...) LIKE %kw% 部分一致、date 降順。recent: date!='' を date 降順 LIMIT。
+//! tag/title: 正規化 keyword の LOWER(...) LIKE %kw% 部分一致、date 降順。
+//! recent: date!='' を date 降順 LIMIT。
 //! list-tags: GROUP BY tag ORDER BY COUNT(*) DESC, tag。
 //! hybrid RRF: 各ストリーム top_n*candidate_factor → rank 1 始まり → score += w * 1/(rrf_k+rank)。
 //!   semantic 未構築なら vec 重み 0 で再正規化し BM25 のみへ degrade。via に bm25/vec/bm25+vec。
@@ -16,6 +18,7 @@
 
 use crate::config::Config;
 use crate::index;
+use crate::normalize::normalize_search_text;
 use rusqlite::{params, params_from_iter, Connection};
 use std::collections::HashMap;
 
@@ -223,7 +226,7 @@ pub fn cmd_tag(cfg: &Config, keyword: &str, json: bool) -> usize {
          FROM tags t JOIN notes n ON t.path = n.path
          WHERE LOWER(t.tag) LIKE ?1
          ORDER BY n.date DESC",
-        &format!("%{}%", keyword.to_lowercase()),
+        &format!("%{}%", normalize_search_text(keyword).to_lowercase()),
     );
     if paths.is_empty() {
         // 0 件 early-return 経路。JSON でもメタ行は必ず出す (exit code は main 側で 1)。
@@ -248,8 +251,11 @@ pub fn cmd_title(cfg: &Config, keyword: &str, json: bool) -> usize {
     let conn = connect(cfg);
     let paths = query_paths(
         &conn,
-        "SELECT path FROM notes WHERE LOWER(title) LIKE ?1 ORDER BY date DESC",
-        &format!("%{}%", keyword.to_lowercase()),
+        "SELECT n.path
+         FROM notes_fts f JOIN notes n ON f.path = n.path
+         WHERE LOWER(f.title) LIKE ?1
+         ORDER BY n.date DESC",
+        &format!("%{}%", normalize_search_text(keyword).to_lowercase()),
     );
     let notes = fetch_notes(&conn, &paths);
     if json {
