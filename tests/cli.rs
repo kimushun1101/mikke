@@ -205,25 +205,52 @@ fn find_preserves_and_semantics_and_english_spaces() {
     let _ = fs::remove_dir_all(&root);
 }
 
-/// tag は格納値を変えず、検索キーワードだけを和欧間スペース正規化する。
+/// tag は検索列とキーワードを正規化し、表示には原文を使う。
 #[test]
-fn tag_normalizes_only_keyword() {
+fn tag_normalizes_stored_value_and_keyword() {
     let root = temp_repo(
         "tag-spacing",
         &[
             ("mikke.toml", "[scan]\n"),
             (
                 "notes/tag.md",
-                "---\ntitle: Tag\ntags: [設計foo]\n---\n\n本文。\n",
+                "---\ntitle: Tag\ntags: [機械 学習]\n---\n\n本文。\n",
             ),
         ],
     );
     run(&root, &["index"]);
-    let out = run_raw(&root, &["tag", "設計 foo"]);
+    for query in ["機械 学習", "機械学習"] {
+        let out = run_raw(&root, &["tag", query]);
+        assert!(out.status.success(), "tag '{query}' が失敗");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("notes/tag.md"));
+    }
     let tags = run_raw(&root, &["list-tags"]);
-    assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stdout).contains("notes/tag.md"));
-    assert!(String::from_utf8_lossy(&tags.stdout).contains("設計foo (1件)"));
+    assert!(String::from_utf8_lossy(&tags.stdout).contains("機械 学習 (1件)"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// 空白だけの title 検索は全件でなく、空白を含む title だけに一致する。
+#[test]
+fn title_whitespace_keyword_is_not_trimmed_to_empty() {
+    let root = temp_repo(
+        "title-whitespace",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            ("notes/with-space.md", "# Hello World\n\n本文。\n"),
+            ("notes/without-space.md", "# HelloWorld\n\n本文。\n"),
+        ],
+    );
+    run(&root, &["index"]);
+    let out = run_raw(&root, &["title", " "]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "空白だけの title 検索が失敗:\n{stdout}"
+    );
+    assert!(stdout.contains("結果 (1件)"));
+    assert!(stdout.contains("notes/with-space.md"));
+    assert!(!stdout.contains("notes/without-space.md"));
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -630,56 +657,54 @@ fn auto_rebuild_default_off_keeps_old_index() {
     );
 }
 
-/// index_format が無い旧索引は auto_rebuild 有効時だけ再構築する。
+/// index_format が無い旧索引は auto_rebuild 未設定でも再構築する。
 #[test]
-fn old_index_format_respects_auto_rebuild_setting() {
-    for (tag, auto_rebuild, expected_status) in [("on", true, 0), ("off", false, 1)] {
-        let config = format!("[index]\nauto_rebuild = {auto_rebuild}\n");
-        let root = temp_repo(
-            &format!("old-format-{tag}"),
-            &[
-                ("mikke.toml", &config),
-                ("a.md", "# A\n\nTypst は組版システムです。\n"),
-            ],
-        );
-        run(&root, &["index"]);
+fn old_index_format_rebuilds_before_title_search() {
+    let root = temp_repo(
+        "old-format-title",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            ("a.md", "# ROS 2 入門\n\n本文。\n"),
+        ],
+    );
+    run(&root, &["index"]);
 
-        let conn = Connection::open(root.join(".mikke/index.sqlite")).unwrap();
-        conn.execute("DELETE FROM meta WHERE key = 'index_format'", [])
-            .unwrap();
-        conn.execute("DELETE FROM notes_fts", []).unwrap();
-        conn.execute(
-            "INSERT INTO notes_fts (path, title, content) VALUES ('a.md', 'A', 'Typst は組版システムです。')",
+    let conn = Connection::open(root.join(".mikke/index.sqlite")).unwrap();
+    conn.execute("DELETE FROM meta WHERE key = 'index_format'", [])
+        .unwrap();
+    // 旧形式相当: notes_fts.title を未正規化の原文に戻す
+    conn.execute("DELETE FROM notes_fts", []).unwrap();
+    conn.execute(
+        "INSERT INTO notes_fts (path, title, content) VALUES ('a.md', 'ROS 2 入門', '本文。')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let out = run_raw(&root, &["title", "ROS 2 入門"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "旧索引の title 検索:\n{stdout}\n{stderr}"
+    );
+    assert!(stdout.contains("結果 (1件)"));
+    assert!(stdout.contains("ROS 2 入門"));
+    assert!(
+        stderr.contains("索引の形式が変わったため"),
+        "再構築告知:\n{stderr}"
+    );
+
+    let conn = Connection::open(root.join(".mikke/index.sqlite")).unwrap();
+    let format: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'index_format'",
             [],
+            |r| r.get(0),
         )
         .unwrap();
-        drop(conn);
-
-        let out = run_raw(&root, &["find", "Typstは"]);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert_eq!(
-            out.status.code(),
-            Some(expected_status),
-            "auto_rebuild={auto_rebuild} の旧索引検索:\n{stdout}\n{stderr}"
-        );
-        assert_eq!(
-            stderr.contains("再構築"),
-            auto_rebuild,
-            "auto_rebuild={auto_rebuild} の再構築告知:\n{stderr}"
-        );
-
-        let conn = Connection::open(root.join(".mikke/index.sqlite")).unwrap();
-        let format: Option<String> = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'index_format'",
-                [],
-                |r| r.get(0),
-            )
-            .ok();
-        assert_eq!(format.as_deref(), auto_rebuild.then_some("1"));
-        let _ = fs::remove_dir_all(&root);
-    }
+    assert_eq!(format, "2");
+    let _ = fs::remove_dir_all(&root);
 }
 
 // --- version (slim/full 判別) ---

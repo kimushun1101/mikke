@@ -3,13 +3,12 @@
 //! SQLite スキーマ (drop→再作成の全再構築):
 //!   notes(path PK, title NOT NULL, date, updated, summary, word_count)
 //!     INDEX idx_notes_date ON notes(date DESC)
-//!   tags(path, tag, PK(path,tag))  INDEX idx_tags_tag ON tags(tag)
+//!   tags(path, tag, tag_search, PK(path,tag))  INDEX idx_tags_tag ON tags(tag)
 //!   links(path, target, PK(path,target))
 //!   notes_fts USING fts5(path UNINDEXED, title, content, tokenize='trigram')
 //!   meta(key PK, value)   -- meta['generated'] に生成時刻 (health 鮮度判定 +
 //!                            auto_rebuild の stale 判定)、meta['scanned_paths_sha256'] に
-//!                            走査 path 集合のスナップショット、meta['index_format'] に
-//!                            索引形式 (いずれも auto_rebuild の stale 判定)
+//!                            走査 path 集合のスナップショット、meta['index_format'] に索引形式
 //!
 //! meta['generated'] は epoch 秒 (ナノ秒精度の小数文字列) で保存する。
 //! 秒精度だと mtime (小数秒) との比較で秒未満の更新を取りこぼすため
@@ -58,6 +57,7 @@ const SCHEMA: &str = "
     CREATE TABLE tags (
         path TEXT NOT NULL,
         tag TEXT NOT NULL,
+        tag_search TEXT NOT NULL,
         PRIMARY KEY (path, tag)
     );
     CREATE INDEX idx_tags_tag ON tags(tag);
@@ -84,7 +84,8 @@ const SCHEMA: &str = "
 /// 走査 path 集合のスナップショットを保存する meta キー。
 const META_SCANNED_PATHS: &str = "scanned_paths_sha256";
 const META_INDEX_FORMAT: &str = "index_format";
-const INDEX_FORMAT: &str = "1";
+// 正規化規則 (src/normalize.rs) や検索用の列を変えた場合は上げる。
+const INDEX_FORMAT: &str = "2";
 
 /// 走査 path 集合 (root 相対 posix) のスナップショット: ソート済リストの SHA-256。
 /// mtime が保存される移動・リネームや追加・削除を auto_rebuild の stale 判定で検知する。
@@ -174,8 +175,8 @@ pub fn build_to(cfg: &Config, use_stderr: bool) -> BuildIssues {
         .expect("notes への INSERT に失敗");
         for tag in &note.tags {
             conn.execute(
-                "INSERT INTO tags (path, tag) VALUES (?1, ?2)",
-                params![note.path_rel, tag],
+                "INSERT INTO tags (path, tag, tag_search) VALUES (?1, ?2, ?3)",
+                params![note.path_rel, tag, normalize_search_text(tag)],
             )
             .expect("tags への INSERT に失敗");
         }
@@ -269,8 +270,8 @@ pub fn cmd_index(cfg: &Config, check: bool) {
 }
 
 /// 既存 index が stale かを短命 Connection で判定する (auto_rebuild 用)。
-/// stale 条件: index format 不一致、meta['generated'] / スナップショット欠落、いずれかの
-/// md の mtime > generated、走査 path 集合のハッシュがスナップショットと不一致。
+/// stale 条件: meta['generated'] / スナップショット欠落、いずれかの md の
+/// mtime > generated、走査 path 集合のハッシュがスナップショットと不一致。
 fn index_is_stale(cfg: &Config) -> bool {
     let conn = match Connection::open(cfg.index_path()) {
         Ok(c) => c,
@@ -282,9 +283,6 @@ fn index_is_stale(cfg: &Config) -> bool {
         })
         .ok()
     };
-    if meta(META_INDEX_FORMAT).as_deref() != Some(INDEX_FORMAT) {
-        return true;
-    }
     // meta['generated'] が無い旧形式 index は stale 扱い
     let Some(generated) = meta("generated").and_then(|v| v.parse::<f64>().ok()) else {
         return true;
@@ -302,6 +300,19 @@ fn index_is_stale(cfg: &Config) -> bool {
     scanned_paths_hash(&rel_paths) != saved_hash
 }
 
+/// 現行の index format かを meta 1 行だけで判定する。index を開けなければ後段へ任せる。
+fn index_format_matches(cfg: &Config) -> Option<bool> {
+    let conn = Connection::open(cfg.index_path()).ok()?;
+    let format = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![META_INDEX_FORMAT],
+            |r| r.get::<_, String>(0),
+        )
+        .ok();
+    Some(format.as_deref() == Some(INDEX_FORMAT))
+}
+
 /// index が無ければ build する (clone 直後フォールバック)。stderr に告知。
 /// 存在時の鮮度判定はしない — health はこちらを使い、auto_rebuild が
 /// 鮮度診断をマスクしないようにする (docs/SPEC.md「index スキーマ」)。
@@ -312,11 +323,17 @@ pub fn ensure_index_exists(cfg: &Config) {
     }
 }
 
-/// 検索系コマンドの index 準備。無ければ build し、[index] auto_rebuild = true なら
-/// 鮮度を判定して stale なら全再構築する (告知はいずれも stderr — stdout は安定出力)。
+/// 検索系コマンドの index 準備。形式は毎回確認し、不一致なら設定によらず再構築する。
+/// 形式一致後、[index] auto_rebuild = true なら鮮度も判定する。
 pub fn ensure_index(cfg: &Config) {
     if !cfg.index_path().exists() {
         eprintln!("インデックスが無いため生成しています...");
+        build_to(cfg, true);
+        return;
+    }
+    // 開けない index (None) は鮮度判定 (auto_rebuild) か後段の接続エラーに任せる
+    if index_format_matches(cfg) == Some(false) {
+        eprintln!("索引の形式が変わったため index を再構築しています...");
         build_to(cfg, true);
         return;
     }
