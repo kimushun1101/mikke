@@ -129,6 +129,12 @@ pub fn build_to(cfg: &Config, use_stderr: bool) -> BuildIssues {
         std::process::exit(2);
     });
     conn.execute_batch(SCHEMA).expect("schema 作成に失敗");
+    // 形式は最初に書く。構築中の index を他プロセスの検索が形式不一致と見て消さないように
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        params![META_INDEX_FORMAT, INDEX_FORMAT],
+    )
+    .expect("meta への INSERT に失敗");
 
     let mut note_count = 0i64;
     let mut tag_set: HashSet<String> = HashSet::new();
@@ -213,11 +219,6 @@ pub fn build_to(cfg: &Config, use_stderr: bool) -> BuildIssues {
         params![META_SCANNED_PATHS, scanned_paths_hash(&scanned_paths)],
     )
     .expect("meta への INSERT に失敗");
-    conn.execute(
-        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
-        params![META_INDEX_FORMAT, INDEX_FORMAT],
-    )
-    .expect("meta への INSERT に失敗");
 
     emit(
         use_stderr,
@@ -300,17 +301,26 @@ fn index_is_stale(cfg: &Config) -> bool {
     scanned_paths_hash(&rel_paths) != saved_hash
 }
 
-/// 現行の index format かを meta 1 行だけで判定する。index を開けなければ後段へ任せる。
+/// 現行の index format かを meta 1 行だけで判定する。
+/// 不一致と見なすのは、行が無い・meta テーブルが無い (旧形式)・DB でない (破損) 場合だけ。
+/// 開けない・ロック中などの読めない場合は None を返して後段へ任せる。
 fn index_format_matches(cfg: &Config) -> Option<bool> {
     let conn = Connection::open(cfg.index_path()).ok()?;
-    let format = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = ?1",
-            params![META_INDEX_FORMAT],
-            |r| r.get::<_, String>(0),
-        )
-        .ok();
-    Some(format.as_deref() == Some(INDEX_FORMAT))
+    match conn.query_row(
+        "SELECT value FROM meta WHERE key = ?1",
+        params![META_INDEX_FORMAT],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(format) => Some(format == INDEX_FORMAT),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Some(false),
+        Err(rusqlite::Error::SqliteFailure(e, msg))
+            if e.code == rusqlite::ErrorCode::NotADatabase
+                || msg.as_deref().is_some_and(|m| m.contains("no such table")) =>
+        {
+            Some(false)
+        }
+        Err(_) => None,
+    }
 }
 
 /// index が無ければ build する (clone 直後フォールバック)。stderr に告知。
