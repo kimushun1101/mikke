@@ -7,6 +7,7 @@ mod config;
 mod embed;
 mod health;
 mod index;
+mod normalize;
 mod scan;
 mod search;
 

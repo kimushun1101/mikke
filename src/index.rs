@@ -3,12 +3,12 @@
 //! SQLite スキーマ (drop→再作成の全再構築):
 //!   notes(path PK, title NOT NULL, date, updated, summary, word_count)
 //!     INDEX idx_notes_date ON notes(date DESC)
-//!   tags(path, tag, PK(path,tag))  INDEX idx_tags_tag ON tags(tag)
+//!   tags(path, tag, tag_search, PK(path,tag))  INDEX idx_tags_tag ON tags(tag)
 //!   links(path, target, PK(path,target))
 //!   notes_fts USING fts5(path UNINDEXED, title, content, tokenize='trigram')
 //!   meta(key PK, value)   -- meta['generated'] に生成時刻 (health 鮮度判定 +
 //!                            auto_rebuild の stale 判定)、meta['scanned_paths_sha256'] に
-//!                            走査 path 集合のスナップショット (auto_rebuild の stale 判定)
+//!                            走査 path 集合のスナップショット、meta['index_format'] に索引形式
 //!
 //! meta['generated'] は epoch 秒 (ナノ秒精度の小数文字列) で保存する。
 //! 秒精度だと mtime (小数秒) との比較で秒未満の更新を取りこぼすため
@@ -17,6 +17,7 @@
 #![allow(dead_code)]
 
 use crate::config::{to_posix, Config};
+use crate::normalize::normalize_search_text;
 use crate::scan;
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
@@ -56,6 +57,7 @@ const SCHEMA: &str = "
     CREATE TABLE tags (
         path TEXT NOT NULL,
         tag TEXT NOT NULL,
+        tag_search TEXT NOT NULL,
         PRIMARY KEY (path, tag)
     );
     CREATE INDEX idx_tags_tag ON tags(tag);
@@ -81,6 +83,9 @@ const SCHEMA: &str = "
 
 /// 走査 path 集合のスナップショットを保存する meta キー。
 const META_SCANNED_PATHS: &str = "scanned_paths_sha256";
+const META_INDEX_FORMAT: &str = "index_format";
+// 正規化規則 (src/normalize.rs) や検索用の列を変えた場合は上げる。
+const INDEX_FORMAT: &str = "2";
 
 /// 走査 path 集合 (root 相対 posix) のスナップショット: ソート済リストの SHA-256。
 /// mtime が保存される移動・リネームや追加・削除を auto_rebuild の stale 判定で検知する。
@@ -124,6 +129,12 @@ pub fn build_to(cfg: &Config, use_stderr: bool) -> BuildIssues {
         std::process::exit(2);
     });
     conn.execute_batch(SCHEMA).expect("schema 作成に失敗");
+    // 形式は最初に書く。構築中の index を他プロセスの検索が形式不一致と見て消さないように
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        params![META_INDEX_FORMAT, INDEX_FORMAT],
+    )
+    .expect("meta への INSERT に失敗");
 
     let mut note_count = 0i64;
     let mut tag_set: HashSet<String> = HashSet::new();
@@ -170,8 +181,8 @@ pub fn build_to(cfg: &Config, use_stderr: bool) -> BuildIssues {
         .expect("notes への INSERT に失敗");
         for tag in &note.tags {
             conn.execute(
-                "INSERT INTO tags (path, tag) VALUES (?1, ?2)",
-                params![note.path_rel, tag],
+                "INSERT INTO tags (path, tag, tag_search) VALUES (?1, ?2, ?3)",
+                params![note.path_rel, tag, normalize_search_text(tag)],
             )
             .expect("tags への INSERT に失敗");
         }
@@ -182,9 +193,11 @@ pub fn build_to(cfg: &Config, use_stderr: bool) -> BuildIssues {
             )
             .expect("links への INSERT に失敗");
         }
+        let fts_title = normalize_search_text(&note.title);
+        let fts_content = normalize_search_text(&note.content);
         conn.execute(
             "INSERT INTO notes_fts (path, title, content) VALUES (?1, ?2, ?3)",
-            params![note.path_rel, note.title, note.content],
+            params![note.path_rel, fts_title, fts_content],
         )
         .expect("notes_fts への INSERT に失敗");
 
@@ -258,7 +271,7 @@ pub fn cmd_index(cfg: &Config, check: bool) {
 }
 
 /// 既存 index が stale かを短命 Connection で判定する (auto_rebuild 用)。
-/// stale 条件: meta['generated'] / スナップショットが無い旧形式、いずれかの md の
+/// stale 条件: meta['generated'] / スナップショット欠落、いずれかの md の
 /// mtime > generated、走査 path 集合のハッシュがスナップショットと不一致。
 fn index_is_stale(cfg: &Config) -> bool {
     let conn = match Connection::open(cfg.index_path()) {
@@ -288,6 +301,28 @@ fn index_is_stale(cfg: &Config) -> bool {
     scanned_paths_hash(&rel_paths) != saved_hash
 }
 
+/// 現行の index format かを meta 1 行だけで判定する。
+/// 不一致と見なすのは、行が無い・meta テーブルが無い (旧形式)・DB でない (破損) 場合だけ。
+/// 開けない・ロック中などの読めない場合は None を返して後段へ任せる。
+fn index_format_matches(cfg: &Config) -> Option<bool> {
+    let conn = Connection::open(cfg.index_path()).ok()?;
+    match conn.query_row(
+        "SELECT value FROM meta WHERE key = ?1",
+        params![META_INDEX_FORMAT],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(format) => Some(format == INDEX_FORMAT),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Some(false),
+        Err(rusqlite::Error::SqliteFailure(e, msg))
+            if e.code == rusqlite::ErrorCode::NotADatabase
+                || msg.as_deref().is_some_and(|m| m.contains("no such table")) =>
+        {
+            Some(false)
+        }
+        Err(_) => None,
+    }
+}
+
 /// index が無ければ build する (clone 直後フォールバック)。stderr に告知。
 /// 存在時の鮮度判定はしない — health はこちらを使い、auto_rebuild が
 /// 鮮度診断をマスクしないようにする (docs/SPEC.md「index スキーマ」)。
@@ -298,11 +333,17 @@ pub fn ensure_index_exists(cfg: &Config) {
     }
 }
 
-/// 検索系コマンドの index 準備。無ければ build し、[index] auto_rebuild = true なら
-/// 鮮度を判定して stale なら全再構築する (告知はいずれも stderr — stdout は安定出力)。
+/// 検索系コマンドの index 準備。形式は毎回確認し、不一致なら設定によらず再構築する。
+/// 形式一致後、[index] auto_rebuild = true なら鮮度も判定する。
 pub fn ensure_index(cfg: &Config) {
     if !cfg.index_path().exists() {
         eprintln!("インデックスが無いため生成しています...");
+        build_to(cfg, true);
+        return;
+    }
+    // 開けない index (None) は鮮度判定 (auto_rebuild) か後段の接続エラーに任せる
+    if index_format_matches(cfg) == Some(false) {
+        eprintln!("索引の形式が変わったため index を再構築しています...");
         build_to(cfg, true);
         return;
     }
