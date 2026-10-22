@@ -3,13 +3,68 @@
 //! ルート解決の優先順: --root 引数 > 環境変数 MIKKE_ROOT > cwd から上方に
 //! mikke.toml / .mikke.toml を探索 > git root。型不一致は silent に誤動作させず即エラー終了する
 //! (特に「文字列配列指定に文字列を渡すと 1 文字ずつに分解される」事故を型検査で弾く)。
+//! 未知の節・キーと効かない値は警告にとどめる (docs/SPEC.md「設定読み込みの厳格さ」)。
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 /// 設定ファイル名の探索順 (先頭が優先)。隠したい repo 向けに dotfile 変種も受ける。
 pub const CONFIG_FILENAMES: &[&str] = &["mikke.toml", ".mikke.toml"];
+
+/// 設定スキーマの全キー。docs/SPEC.md「設定スキーマ」と揃える (unit test で照合する)。
+/// 未知の節・キーの警告と候補の提示に使う。
+const KNOWN_KEYS: &[(&str, &[&str])] = &[
+    (
+        "scan",
+        &[
+            "include",
+            "exclude_dirs",
+            "exclude_files",
+            "exclude_paths",
+            "respect_gitignore",
+        ],
+    ),
+    ("index", &["path", "embeddings_dir", "auto_rebuild"]),
+    (
+        "semantic",
+        &["enabled", "model", "query_prefix", "passage_prefix"],
+    ),
+    (
+        "search",
+        &[
+            "bm25_limit",
+            "rrf_k",
+            "bm25_weight",
+            "vector_weight",
+            "candidate_factor",
+        ],
+    ),
+    (
+        "health",
+        &[
+            "scan_skip_prefixes",
+            "quality_skip_prefixes",
+            "min_words",
+            "exec_bit_prefixes",
+            "disable",
+        ],
+    ),
+];
+/// ネストした repo の設定で読む節 (docs/SPEC.md「ネストしたノート repo」)。
+const NESTED_SECTIONS: &[&str] = &["scan", "index"];
+
+static WARNED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// 設定の警告を stderr に出す。同じ文面は 1 回の実行で 1 度だけ出す
+/// (ネスト repo の設定は走査のたびに読み直し、auto_rebuild の検索では最大 3 回読むため)。
+pub fn warn_once(msg: String) {
+    let mut w = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+    if w.insert(msg.clone()) {
+        eprintln!("Warning: {msg}");
+    }
+}
 
 /// dir 直下の設定ファイルを優先順で返す。両方あれば mikke.toml 優先 + stderr 警告。
 pub fn find_config_file(dir: &Path) -> Option<PathBuf> {
@@ -19,10 +74,10 @@ pub fn find_config_file(dir: &Path) -> Option<PathBuf> {
         .filter(|p| p.is_file())
         .collect();
     if existing.len() > 1 {
-        eprintln!(
-            "Warning: {} に mikke.toml と .mikke.toml が両方あります。mikke.toml を使用します。",
+        warn_once(format!(
+            "{} に mikke.toml と .mikke.toml が両方あります。mikke.toml を使用します。",
             dir.display()
-        );
+        ));
     }
     existing.into_iter().next()
 }
@@ -65,10 +120,15 @@ const HEALTH_CHECK_NAMES: &[&str] = &[
 #[derive(Debug, Clone)]
 pub struct Config {
     pub root: PathBuf,
+    /// 読んだ設定ファイル (無ければ None)。警告の文面に使う。
+    pub config_path: Option<PathBuf>,
     // [scan]
     pub include: Vec<String>,
     pub exclude_dirs: HashSet<String>,
     pub exclude_files: HashSet<String>,
+    /// [scan] exclude_paths を正規化した値 (root 相対 posix、重複除去)。
+    pub exclude_paths: Vec<String>,
+    pub respect_gitignore: bool,
     // [index]
     pub index_rel: String,
     pub embeddings_rel: String,
@@ -90,7 +150,7 @@ pub struct Config {
     pub min_words: i64,
     pub exec_bit_prefixes: Vec<String>,
     pub disable: Vec<String>,
-    // 出力先 (index/embeddings) 配下を走査から除外する root 相対 prefix (自動算出)
+    // index / embeddings の出力先から自動で算出した root 相対の prefix (配下の .md ファイルだけを外す)。
     pub exclude_path_prefixes: Vec<String>,
 }
 
@@ -98,12 +158,15 @@ impl Config {
     fn with_defaults(root: PathBuf) -> Self {
         Config {
             root,
+            config_path: None,
             include: vec![".".to_string()],
             exclude_dirs: DEFAULT_EXCLUDE_DIRS.iter().map(|s| s.to_string()).collect(),
             exclude_files: DEFAULT_EXCLUDE_FILES
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            exclude_paths: vec![],
+            respect_gitignore: false,
             index_rel: DEFAULT_INDEX_PATH.to_string(),
             embeddings_rel: DEFAULT_EMBEDDINGS_DIR.to_string(),
             auto_rebuild: false,
@@ -298,8 +361,153 @@ fn scalar_num(
     }
 }
 
-/// <root>/mikke.toml (無ければ .mikke.toml) を読む。どちらも無ければデフォルト設定を返す。
+// --- 未知のキーと効かない値の検査 (警告のみ — docs/SPEC.md「設定読み込みの厳格さ」) ---
+
+/// char 単位の Levenshtein 距離。
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let sub = prev[j] + usize::from(ca != *cb);
+            cur[j + 1] = sub.min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// name に近い候補を 1 つ返す。距離 2 以下かつ名前の長さ未満のうち最小 (同点は先に出たもの)。
+fn near<'a>(name: &str, cands: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let len = name.chars().count();
+    let mut best: Option<(usize, &'a str)> = None;
+    for c in cands {
+        let d = edit_distance(name, c);
+        if d <= 2 && d < len && best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, c));
+        }
+    }
+    best.map(|(_, c)| c)
+}
+
+/// key を持つ節を表の順で探す (except の節は除く)。
+fn section_having(key: &str, except: Option<&str>) -> Option<&'static str> {
+    KNOWN_KEYS
+        .iter()
+        .find(|(s, keys)| Some(*s) != except && keys.contains(&key))
+        .map(|(s, _)| *s)
+}
+
+fn hint(h: Option<String>) -> String {
+    h.map(|h| format!(" ({h} ?)")).unwrap_or_default()
+}
+
+/// 未知の節・キーの警告文を返す。sections は中のキーを検査する節
+/// (最上位では全節、ネストでは NESTED_SECTIONS)。表に無い名前の節は常に報告する。
+fn unknown_key_messages(p: &Path, data: &toml::Value, sections: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(top) = data.as_table() else {
+        return out;
+    };
+    for (name, value) in top {
+        if let Some((_, keys)) = KNOWN_KEYS.iter().find(|(s, _)| s == name) {
+            // 読まない節と、テーブルでない値 (型エラーは get_table が出す) は見ない
+            if !sections.contains(&name.as_str()) {
+                continue;
+            }
+            let Some(t) = value.as_table() else {
+                continue;
+            };
+            for k in t.keys() {
+                if keys.contains(&k.as_str()) {
+                    continue;
+                }
+                let h = section_having(k, Some(name))
+                    .map(|s| format!("[{s}] {k}"))
+                    .or_else(|| near(k, keys.iter().copied()).map(str::to_string));
+                out.push(format!(
+                    "{}: 未知のキー [{name}] {k} を無視します{}",
+                    p.display(),
+                    hint(h)
+                ));
+            }
+        } else if value.is_table() {
+            let h = near(name, KNOWN_KEYS.iter().map(|(s, _)| *s)).map(|s| format!("[{s}]"));
+            out.push(format!(
+                "{}: 未知の節 [{name}] を無視します{}",
+                p.display(),
+                hint(h)
+            ));
+        } else {
+            let h = section_having(name, None).map(|s| format!("[{s}] {name}"));
+            out.push(format!(
+                "{}: 節の外の未知のキー {name} を無視します{}",
+                p.display(),
+                hint(h)
+            ));
+        }
+    }
+    out
+}
+
+/// [scan] exclude_paths の値を root 相対の posix パスにそろえる。Err は理由 (文の述部)。
+fn normalize_exclude_path(v: &str) -> Result<String, &'static str> {
+    if v.is_empty() {
+        return Err("空文字です");
+    }
+    if v.chars().any(char::is_control) {
+        return Err("制御文字を含みます (TOML の \"...\" の中では \\ がエスケープになります)");
+    }
+    if v.contains('\\') {
+        return Err("`\\` を含みます");
+    }
+    let b = v.as_bytes();
+    if v.starts_with('/') || (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':') {
+        return Err("絶対パスです");
+    }
+    let parts: Vec<&str> = v
+        .split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect();
+    if parts.contains(&"..") {
+        return Err("`..` を含みます");
+    }
+    if parts.is_empty() {
+        return Err("root そのものを指します");
+    }
+    Ok(parts.join("/"))
+}
+
+/// exclude_dirs / exclude_files の値の警告 (名前の完全一致で比べるため効かない値)。
+fn warn_name_values(p: &Path, key: &str, what: &str, values: &[String]) {
+    for v in values {
+        if v.contains('/') || (cfg!(windows) && v.contains('\\')) {
+            warn_once(format!(
+                "{}: [scan] {key} の \"{v}\" はどの{what}とも一致しません (名前の完全一致で比べます。root 相対のパスで外すには [scan] exclude_paths を使います)",
+                p.display()
+            ));
+        } else if v.contains('*') || v.contains('?') {
+            warn_once(format!(
+                "{}: [scan] {key} の \"{v}\" は glob として扱いません (名前の完全一致で比べます。パターンで外すには [scan] respect_gitignore = true と .gitignore を使います)",
+                p.display()
+            ));
+        }
+    }
+}
+
+/// <root>/mikke.toml (無ければ .mikke.toml) を全節読む。どちらも無ければデフォルト設定を返す。
 pub fn load_config(root: PathBuf) -> Config {
+    load(root, true)
+}
+
+/// ネスト repo 用。[scan] と [index] だけを読み、検査する
+/// (子の [health]/[search]/[semantic] は使わないので読まない — docs/SPEC.md「ネストしたノート repo」)。
+pub fn load_scan_config(root: PathBuf) -> Config {
+    load(root, false)
+}
+
+fn load(root: PathBuf, full: bool) -> Config {
     let mut cfg = Config::with_defaults(root.clone());
     if let Some(toml_path) = find_config_file(&root) {
         let raw = match std::fs::read(&toml_path) {
@@ -313,21 +521,71 @@ pub fn load_config(root: PathBuf) -> Config {
             Err(e) => config_error(&toml_path, &format!("読み込みに失敗: {e}")),
         };
         let p = toml_path.as_path();
+        cfg.config_path = Some(toml_path.clone());
+        let all_sections: Vec<&str> = KNOWN_KEYS.iter().map(|(s, _)| *s).collect();
+        let sections = if full {
+            all_sections.as_slice()
+        } else {
+            NESTED_SECTIONS
+        };
+        for msg in unknown_key_messages(p, &data, sections) {
+            warn_once(msg);
+        }
 
         let scan = get_table(p, &data, "scan");
         cfg.include = str_list(p, &scan, "scan", "include", cfg.include);
-        cfg.exclude_dirs = str_list(p, &scan, "scan", "exclude_dirs", sorted(&cfg.exclude_dirs))
-            .into_iter()
-            .collect();
-        cfg.exclude_files = str_list(
+        let exclude_dirs = str_list(p, &scan, "scan", "exclude_dirs", sorted(&cfg.exclude_dirs));
+        let exclude_files = str_list(
             p,
             &scan,
             "scan",
             "exclude_files",
             sorted(&cfg.exclude_files),
-        )
-        .into_iter()
-        .collect();
+        );
+        cfg.respect_gitignore =
+            scalar_bool(p, &scan, "scan", "respect_gitignore", cfg.respect_gitignore);
+        for v in str_list(p, &scan, "scan", "exclude_paths", vec![]) {
+            match normalize_exclude_path(&v) {
+                Ok(n) => {
+                    if !cfg.exclude_paths.contains(&n) {
+                        cfg.exclude_paths.push(n);
+                    }
+                }
+                Err(reason) => config_error(
+                    p,
+                    &format!(
+                        "[scan] exclude_paths の {} は {reason}。root 相対のパスを / 区切りで書いてください (例: exclude_paths = [\"state\"])",
+                        // 制御文字は見えるように Debug で出す
+                        if v.chars().any(char::is_control) {
+                            format!("{v:?}")
+                        } else {
+                            format!("\"{v}\"")
+                        }
+                    ),
+                ),
+            }
+        }
+        // 黙って効かない値の警告 (既定値には当たる値が無い)
+        warn_name_values(p, "exclude_dirs", "ディレクトリ名", &exclude_dirs);
+        warn_name_values(p, "exclude_files", "ファイル名", &exclude_files);
+        for v in &cfg.exclude_paths {
+            if v.contains('*') || v.contains('?') {
+                warn_once(format!(
+                    "{}: [scan] exclude_paths の \"{v}\" は glob として扱いません (root 相対のパスの完全一致で比べます)",
+                    p.display()
+                ));
+            }
+        }
+        for v in &cfg.include {
+            if cfg.root.join(v).is_file() {
+                warn_once(format!(
+                    "{}: [scan] include の \"{v}\" はファイルのため走査しません (include にはディレクトリを書きます)",
+                    p.display()
+                ));
+            }
+        }
+        cfg.exclude_dirs = exclude_dirs.into_iter().collect();
+        cfg.exclude_files = exclude_files.into_iter().collect();
 
         let index = get_table(p, &data, "index");
         cfg.index_rel = scalar_str(p, &index, "index", "path", cfg.index_rel);
@@ -348,66 +606,70 @@ pub fn load_config(root: PathBuf) -> Config {
         cfg.embeddings_rel = scalar_str(p, &index, "index", "embeddings_dir", cfg.embeddings_rel);
         cfg.auto_rebuild = scalar_bool(p, &index, "index", "auto_rebuild", cfg.auto_rebuild);
 
-        let semantic = get_table(p, &data, "semantic");
-        cfg.semantic_enabled =
-            scalar_bool(p, &semantic, "semantic", "enabled", cfg.semantic_enabled);
-        cfg.model = scalar_str(p, &semantic, "semantic", "model", cfg.model);
-        cfg.query_prefix = scalar_str(p, &semantic, "semantic", "query_prefix", cfg.query_prefix);
-        cfg.passage_prefix = scalar_str(
-            p,
-            &semantic,
-            "semantic",
-            "passage_prefix",
-            cfg.passage_prefix,
-        );
+        if full {
+            let semantic = get_table(p, &data, "semantic");
+            cfg.semantic_enabled =
+                scalar_bool(p, &semantic, "semantic", "enabled", cfg.semantic_enabled);
+            cfg.model = scalar_str(p, &semantic, "semantic", "model", cfg.model);
+            cfg.query_prefix =
+                scalar_str(p, &semantic, "semantic", "query_prefix", cfg.query_prefix);
+            cfg.passage_prefix = scalar_str(
+                p,
+                &semantic,
+                "semantic",
+                "passage_prefix",
+                cfg.passage_prefix,
+            );
 
-        let search = get_table(p, &data, "search");
-        cfg.bm25_limit = scalar_int(p, &search, "search", "bm25_limit", cfg.bm25_limit);
-        cfg.rrf_k = scalar_int(p, &search, "search", "rrf_k", cfg.rrf_k);
-        cfg.bm25_weight = scalar_num(p, &search, "search", "bm25_weight", cfg.bm25_weight);
-        cfg.vector_weight = scalar_num(p, &search, "search", "vector_weight", cfg.vector_weight);
-        cfg.candidate_factor = scalar_int(
-            p,
-            &search,
-            "search",
-            "candidate_factor",
-            cfg.candidate_factor,
-        );
+            let search = get_table(p, &data, "search");
+            cfg.bm25_limit = scalar_int(p, &search, "search", "bm25_limit", cfg.bm25_limit);
+            cfg.rrf_k = scalar_int(p, &search, "search", "rrf_k", cfg.rrf_k);
+            cfg.bm25_weight = scalar_num(p, &search, "search", "bm25_weight", cfg.bm25_weight);
+            cfg.vector_weight =
+                scalar_num(p, &search, "search", "vector_weight", cfg.vector_weight);
+            cfg.candidate_factor = scalar_int(
+                p,
+                &search,
+                "search",
+                "candidate_factor",
+                cfg.candidate_factor,
+            );
 
-        let health = get_table(p, &data, "health");
-        cfg.scan_skip_prefixes = str_list(
-            p,
-            &health,
-            "health",
-            "scan_skip_prefixes",
-            cfg.scan_skip_prefixes,
-        );
-        cfg.quality_skip_prefixes = str_list(
-            p,
-            &health,
-            "health",
-            "quality_skip_prefixes",
-            cfg.quality_skip_prefixes,
-        );
-        cfg.min_words = scalar_int(p, &health, "health", "min_words", cfg.min_words);
-        cfg.exec_bit_prefixes = str_list(
-            p,
-            &health,
-            "health",
-            "exec_bit_prefixes",
-            cfg.exec_bit_prefixes,
-        );
-        cfg.disable = str_list(p, &health, "health", "disable", cfg.disable);
-        // 未知名は typo を silent no-op にせず即エラー終了する (「設定読み込みの厳格さ」)
-        for name in &cfg.disable {
-            if !HEALTH_CHECK_NAMES.contains(&name.as_str()) {
-                config_error(
-                    p,
-                    &format!(
-                        "[health] disable に未知のチェック名 \"{name}\" (指定可能: {})",
-                        HEALTH_CHECK_NAMES.join(", ")
-                    ),
-                );
+            let health = get_table(p, &data, "health");
+            cfg.scan_skip_prefixes = str_list(
+                p,
+                &health,
+                "health",
+                "scan_skip_prefixes",
+                cfg.scan_skip_prefixes,
+            );
+            cfg.quality_skip_prefixes = str_list(
+                p,
+                &health,
+                "health",
+                "quality_skip_prefixes",
+                cfg.quality_skip_prefixes,
+            );
+            cfg.min_words = scalar_int(p, &health, "health", "min_words", cfg.min_words);
+            cfg.exec_bit_prefixes = str_list(
+                p,
+                &health,
+                "health",
+                "exec_bit_prefixes",
+                cfg.exec_bit_prefixes,
+            );
+            cfg.disable = str_list(p, &health, "health", "disable", cfg.disable);
+            // 未知名は typo を silent no-op にせず即エラー終了する (「設定読み込みの厳格さ」)
+            for name in &cfg.disable {
+                if !HEALTH_CHECK_NAMES.contains(&name.as_str()) {
+                    config_error(
+                        p,
+                        &format!(
+                            "[health] disable に未知のチェック名 \"{name}\" (指定可能: {})",
+                            HEALTH_CHECK_NAMES.join(", ")
+                        ),
+                    );
+                }
             }
         }
     }
@@ -466,4 +728,159 @@ pub fn to_posix(p: &Path) -> String {
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// md 本文から ```toml ブロックの中身を順に抜き出す。
+    fn toml_blocks(md: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cur: Option<String> = None;
+        for line in md.lines() {
+            match cur.as_mut() {
+                None if line.trim_start().starts_with("```toml") => cur = Some(String::new()),
+                None => {}
+                Some(_) if line.trim_start().starts_with("```") => out.push(cur.take().unwrap()),
+                Some(b) => {
+                    b.push_str(line);
+                    b.push('\n');
+                }
+            }
+        }
+        out
+    }
+
+    fn all_sections() -> Vec<&'static str> {
+        KNOWN_KEYS.iter().map(|(s, _)| *s).collect()
+    }
+
+    fn msgs(src: &str, sections: &[&str]) -> Vec<String> {
+        let v: toml::Value = toml::from_str(src).unwrap();
+        unknown_key_messages(Path::new("x"), &v, sections)
+    }
+
+    #[test]
+    fn known_keys_match_spec_schema() {
+        let spec = include_str!("../docs/SPEC.md");
+        let after = &spec[spec.find("## 設定スキーマ").unwrap()..];
+        let block = toml_blocks(after).into_iter().next().unwrap();
+        let v: toml::Value = toml::from_str(&block).unwrap();
+        let mut from_spec = BTreeSet::new();
+        for (sec, t) in v.as_table().unwrap() {
+            for k in t.as_table().unwrap().keys() {
+                from_spec.insert((sec.clone(), k.clone()));
+            }
+        }
+        let from_table: BTreeSet<(String, String)> = KNOWN_KEYS
+            .iter()
+            .flat_map(|(s, keys)| keys.iter().map(|k| (s.to_string(), k.to_string())))
+            .collect();
+        assert_eq!(from_spec, from_table);
+    }
+
+    #[test]
+    fn docs_toml_blocks_have_no_unknown_keys() {
+        let all = all_sections();
+        for (name, md) in [
+            ("README.md", include_str!("../README.md")),
+            ("docs/SPEC.md", include_str!("../docs/SPEC.md")),
+        ] {
+            let blocks = toml_blocks(md);
+            assert!(!blocks.is_empty(), "{name} に toml ブロックが無い");
+            for b in blocks {
+                let v: toml::Value = toml::from_str(&b)
+                    .unwrap_or_else(|e| panic!("{name} の toml ブロックが読めない: {e}\n{b}"));
+                let m = unknown_key_messages(Path::new("x"), &v, &all);
+                assert!(m.is_empty(), "{name}: {m:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_key_messages_cases() {
+        let all = all_sections();
+        let m = msgs("[scan]\nexclude_dir = []\n", &all);
+        assert_eq!(m.len(), 1);
+        assert!(
+            m[0].contains("未知のキー [scan] exclude_dir") && m[0].contains("(exclude_dirs ?)")
+        );
+
+        let m = msgs("[scna]\ninclude = []\nwalrus = 1\n", &all);
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert!(m[0].contains("未知の節 [scna]") && m[0].contains("([scan] ?)"));
+
+        let m = msgs("[index]\nauto_rebuld = true\n", &all);
+        assert!(m[0].contains("(auto_rebuild ?)"), "{m:?}");
+
+        let m = msgs("[search]\nauto_rebuild = true\n", &all);
+        assert!(m[0].contains("([index] auto_rebuild ?)"), "{m:?}");
+
+        let m = msgs("auto_rebuild = true\n", &all);
+        assert!(
+            m[0].contains("節の外の未知のキー auto_rebuild")
+                && m[0].contains("([index] auto_rebuild ?)"),
+            "{m:?}"
+        );
+
+        let m = msgs("[scan]\nzebra = 1\n", &all);
+        assert!(m[0].ends_with("を無視します"), "{m:?}");
+
+        let nested = msgs(
+            "health = 1\n[search]\nbm25_limit = \"x\"\n[scna]\n",
+            NESTED_SECTIONS,
+        );
+        assert_eq!(nested.len(), 1, "{nested:?}");
+        assert!(nested[0].contains("[scna]"));
+        assert!(msgs("[health]\nwalrus = 1\n", NESTED_SECTIONS).is_empty());
+
+        assert!(msgs(
+            "[scan]\ninclude = []\nexclude_paths = []\n[index]\nauto_rebuild = true\n",
+            &all
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn near_cases() {
+        assert_eq!(
+            near("exclude_dir", ["include", "exclude_dirs"]),
+            Some("exclude_dirs")
+        );
+        assert_eq!(near("scna", ["scan", "index"]), Some("scan"));
+        assert_eq!(near("abcdef", ["abcdxy"]), Some("abcdxy"));
+        assert_eq!(near("abcdef", ["abcxyz"]), None);
+        assert_eq!(near("ab", ["xy"]), None);
+    }
+
+    #[test]
+    fn normalize_exclude_path_cases() {
+        for (v, want) in [
+            ("state", "state"),
+            ("state/", "state"),
+            ("./state", "state"),
+            ("a//b", "a/b"),
+            ("./a/./b/", "a/b"),
+            ("a..b", "a..b"),
+        ] {
+            assert_eq!(normalize_exclude_path(v).as_deref(), Ok(want), "{v:?}");
+        }
+        for v in [
+            "",
+            ".",
+            "./",
+            "//",
+            "/state",
+            "C:/state",
+            "c:state",
+            "..",
+            "../x",
+            "a/../b",
+            "state\\cache",
+            "a\tb",
+        ] {
+            assert!(normalize_exclude_path(v).is_err(), "{v:?}");
+        }
+    }
 }

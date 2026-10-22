@@ -2526,3 +2526,859 @@ fn golden_md_report() {
     let _ = fs::remove_dir_all(&root);
     assert_eq!(got, expected, "md-report mismatch");
 }
+
+// --- 設定の書き間違いの警告 (#55)・.gitignore (#56)・exclude_paths (#57)・ネスト設定 (#58) ---
+
+/// index の stdout から「ノート数: N」を読む。
+fn note_count(stdout: &str) -> Option<usize> {
+    stdout
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ノート数: "))
+        .and_then(|n| n.trim().parse().ok())
+}
+
+/// stdout の「path: X」を集める (X は root 相対の posix パス)。
+fn result_paths(stdout: &str) -> std::collections::BTreeSet<String> {
+    stdout
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("path: "))
+        .map(|s| s.trim().to_string())
+        .collect()
+}
+
+fn set_of(items: &[&str]) -> std::collections::BTreeSet<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+
+/// index を流し、(exit code, stdout, stderr) を返す。
+fn index_raw(root: &Path) -> (Option<i32>, String, String) {
+    let out = run_raw(root, &["index"]);
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// SPEC の「設定スキーマ」の toml ブロック。
+fn spec_schema_toml() -> String {
+    // Windows の checkout では CRLF になりうる
+    let spec = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/SPEC.md"))
+        .unwrap()
+        .replace("\r\n", "\n");
+    let after = &spec[spec.find("## 設定スキーマ").unwrap()..];
+    let start = after.find("```toml\n").unwrap() + "```toml\n".len();
+    let end = after[start..].find("```").unwrap();
+    after[start..start + end].to_string()
+}
+
+const NOTE_A: &str = "---\ntitle: a\ndate: 2026-01-01\n---\nwalrus a\n";
+const NOTE_S: &str = "---\ntitle: s\ndate: 2026-01-01\n---\nwalrus s\n";
+
+/// 黙って効かない設定 (issue #55 の表) は stderr に path 付きで警告し、exit code と stdout は変えない。
+#[test]
+fn config_ineffective_settings_warn() {
+    let cases: &[(&str, &str, usize, &[&str])] = &[
+        (
+            "key",
+            "[scan]\nexclude_dir = [\"scratch\"]\n",
+            2,
+            &["未知のキー [scan] exclude_dir", "exclude_dirs ?"],
+        ),
+        (
+            "section",
+            "[scna]\ninclude = [\"notes\"]\n",
+            2,
+            &["未知の節 [scna]", "[scan] ?"],
+        ),
+        (
+            "index-key",
+            "[index]\nauto_rebuld = true\n",
+            2,
+            &["auto_rebuld", "auto_rebuild ?"],
+        ),
+        (
+            "wrong-section",
+            "[search]\nauto_rebuild = true\n",
+            2,
+            &["[search] auto_rebuild", "[index] auto_rebuild ?"],
+        ),
+        (
+            "include-file",
+            "[scan]\ninclude = [\"notes/a.md\"]\n",
+            0,
+            &["include の \"notes/a.md\""],
+        ),
+        (
+            "dir-path",
+            "[scan]\nexclude_dirs = [\"scratch/\"]\n",
+            2,
+            &["\"scratch/\"", "exclude_paths"],
+        ),
+        (
+            "file-glob",
+            "[scan]\nexclude_files = [\"*.md\"]\n",
+            2,
+            &["\"*.md\"", "glob"],
+        ),
+    ];
+    for (tag, config, want, needles) in cases {
+        let root = temp_repo(
+            &format!("warn-{tag}"),
+            &[
+                ("mikke.toml", config),
+                ("notes/a.md", NOTE_A),
+                ("scratch/s.md", NOTE_S),
+            ],
+        );
+        let (code, stdout, stderr) = index_raw(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(code, Some(0), "{config}: exit 0 のはず:\n{stderr}");
+        assert_eq!(
+            note_count(&stdout),
+            Some(*want),
+            "{config}: ノート数が違う:\n{stdout}"
+        );
+        assert!(
+            stderr.contains("mikke.toml") && needles.iter().all(|n| stderr.contains(n)),
+            "{config}: 警告が無い ({needles:?}):\n{stderr}"
+        );
+        assert!(
+            !stdout.contains("Warning"),
+            "{config}: 警告が stdout に混ざっている:\n{stdout}"
+        );
+    }
+}
+
+/// 節を置き違えた auto_rebuild は効かない (警告だけ出し、挙動は既定のまま)。
+#[test]
+fn config_wrong_section_does_not_enable_auto_rebuild() {
+    let root = temp_repo(
+        "warn-arb",
+        &[
+            ("mikke.toml", "[search]\nauto_rebuild = true\n"),
+            ("notes/a.md", NOTE_A),
+        ],
+    );
+    run(&root, &["index"]);
+    fs::write(root.join("notes/b.md"), NOTE_S).unwrap();
+    bump_mtime(&root.join("notes/b.md"), 10);
+    let (stdout, stderr) = run(&root, &["find", "walrus"]);
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        stdout.contains("(1件") && !stdout.contains("notes/b.md"),
+        "置き違えた auto_rebuild が効いている:\n{stdout}"
+    );
+    assert!(!stderr.contains("再構築"), "再構築が走っている:\n{stderr}");
+    assert!(
+        stderr.contains("[index] auto_rebuild ?"),
+        "警告が無い:\n{stderr}"
+    );
+}
+
+/// 節の外のキーも警告し、候補の節を示す。
+#[test]
+fn config_top_level_key_warns() {
+    let root = temp_repo(
+        "warn-top",
+        &[
+            ("mikke.toml", "auto_rebuild = true\n"),
+            ("notes/a.md", NOTE_A),
+        ],
+    );
+    let (code, _, stderr) = index_raw(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(
+        stderr.contains("節の外の未知のキー auto_rebuild")
+            && stderr.contains("[index] auto_rebuild ?"),
+        "警告が無い:\n{stderr}"
+    );
+}
+
+/// `[` を含む名前は glob 扱いの警告を出さず、名前として一致する。
+#[test]
+fn config_bracket_name_does_not_warn() {
+    let root = temp_repo(
+        "warn-bracket",
+        &[
+            ("mikke.toml", "[scan]\nexclude_dirs = [\"[old]\"]\n"),
+            ("notes/a.md", NOTE_A),
+            ("[old]/x.md", NOTE_S),
+        ],
+    );
+    let (code, stdout, stderr) = index_raw(&root);
+    let (found, _) = run(&root, &["find", "walrus"]);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(!stderr.contains("Warning"), "警告が出ている:\n{stderr}");
+    assert_eq!(note_count(&stdout), Some(1), "{stdout}");
+    assert!(!found.contains("[old]/"), "[old] が外れていない:\n{found}");
+}
+
+/// 既知のキーだけの設定 (SPEC のスキーマ・README の例・fixture) は警告しない。
+#[test]
+fn config_known_keys_do_not_warn() {
+    let schema = spec_schema_toml();
+    for (tag, config) in [
+        ("spec", schema.as_str()),
+        ("readme", "[semantic]\nenabled = true\n"),
+    ] {
+        let root = temp_repo(
+            &format!("known-{tag}"),
+            &[("mikke.toml", config), ("notes/a.md", NOTE_A)],
+        );
+        let (code, _, stderr) = index_raw(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(code, Some(0), "{tag}: {stderr}");
+        for bad in ["未知の", "一致しません", "glob として"] {
+            assert!(!stderr.contains(bad), "{tag}: 警告が出ている:\n{stderr}");
+        }
+    }
+    let root = temp_copy("known-fixture");
+    let (code, _, stderr) = index_raw(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(0), "{stderr}");
+    for bad in ["未知の", "一致しません", "glob として"] {
+        assert!(!stderr.contains(bad), "fixture: 警告が出ている:\n{stderr}");
+    }
+}
+
+/// ネスト repo の設定を何度読み直しても、同じ警告は 1 回の実行で 1 度だけ出る。
+#[test]
+fn config_warning_printed_once_per_run() {
+    let files: &[(&str, &str)] = &[
+        ("mikke.toml", "[index]\nauto_rebuild = true\n"),
+        ("sub/mikke.toml", "[scna]\n"),
+        ("sub/.mikke.toml", "[scan]\n"),
+        ("notes/a.md", NOTE_A),
+        ("sub/b.md", NOTE_S),
+    ];
+    let root = temp_repo("warn-once", files);
+    run(&root, &["index"]);
+    bump_mtime(&root.join("notes/a.md"), 10);
+    let (_, stderr) = run(&root, &["find", "walrus"]);
+    let _ = fs::remove_dir_all(&root);
+    assert!(stderr.contains("再構築"), "再構築が走っていない:\n{stderr}");
+    assert_eq!(count_lines(&stderr, "未知の節 [scna]"), 1, "{stderr}");
+    assert_eq!(count_lines(&stderr, "両方あります"), 1, "{stderr}");
+
+    let root = temp_repo("warn-once-health", files);
+    let out = run_raw(&root, &["health"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_eq!(count_lines(&stderr, "未知の節 [scna]"), 1, "{stderr}");
+    assert_eq!(count_lines(&stderr, "両方あります"), 1, "{stderr}");
+}
+
+/// Windows では exclude_dirs の `\` も名前と一致しえないので警告する。
+#[cfg(windows)]
+#[test]
+fn config_warns_backslash_on_windows() {
+    let root = temp_repo(
+        "warn-backslash",
+        &[
+            ("mikke.toml", "[scan]\nexclude_dirs = ['a\\b']\n"),
+            ("notes/a.md", NOTE_A),
+        ],
+    );
+    let (code, _, stderr) = index_raw(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stderr.contains("一致しません"), "警告が無い:\n{stderr}");
+}
+
+/// issue #56 の再現の木。.git は git コマンドを呼ばずにディレクトリだけ作る。
+fn gitignore_repo(tag: &str, config: &str, with_git: bool) -> PathBuf {
+    let root = temp_repo(
+        tag,
+        &[
+            ("mikke.toml", config),
+            (
+                "notes/penguin.md",
+                "---\ntitle: ペンギン観察メモ\ndate: 2026-01-10\ntags: [penguin]\n---\n架空の島に住むペンギン zephyrpenguin の観察記録。\n",
+            ),
+            (
+                "notes/memo.draft.md",
+                "---\ntitle: 下書きメモ\ndate: 2026-02-01\n---\nzephyrpenguin zephyrpenguin の未整理メモ\n",
+            ),
+            (
+                "scratch/draft.md",
+                "---\ntitle: 試しの下書き\ndate: 2026-02-02\n---\nzephyrpenguin zephyrpenguin zephyrpenguin の試し書き\n",
+            ),
+            (
+                "work/tmp/trial.md",
+                "---\ntitle: 作業用コピー\ndate: 2026-02-03\n---\nzephyrpenguin zephyrpenguin の作業用コピー\n",
+            ),
+            (".gitignore", "scratch/\nwork/tmp/\n*.draft.md\n.mikke/\n"),
+        ],
+    );
+    if with_git {
+        fs::create_dir_all(root.join(".git")).unwrap();
+    }
+    root
+}
+
+const RESPECT: &str = "[scan]\nrespect_gitignore = true\n";
+
+/// 既定 (respect_gitignore を書かない) では .gitignore を見ない。
+#[test]
+fn gitignore_default_off() {
+    let root = gitignore_repo("gi-off", "[scan]\n", true);
+    let (code, stdout, stderr) = index_raw(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(note_count(&stdout), Some(4), "{stdout}");
+}
+
+/// respect_gitignore = true で .gitignore が無視するパスを走査しない。
+#[test]
+fn gitignore_respected() {
+    let root = gitignore_repo("gi-on", RESPECT, true);
+    let (code, stdout, stderr) = index_raw(&root);
+    let (found, _) = run(&root, &["find", "zephyrpenguin"]);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(note_count(&stdout), Some(1), "{stdout}");
+    assert!(found.contains("(1件"), "{found}");
+    assert_eq!(
+        result_paths(&found),
+        set_of(&["notes/penguin.md"]),
+        "{found}"
+    );
+}
+
+/// .gitignore の編集は path 集合のハッシュで stale として検知する (mtime は古いまま)。
+#[test]
+fn gitignore_change_triggers_auto_rebuild() {
+    let root = gitignore_repo(
+        "gi-arb",
+        "[scan]\nrespect_gitignore = true\n[index]\nauto_rebuild = true\n",
+        true,
+    );
+    run(&root, &["index"]);
+    fs::write(root.join(".gitignore"), "work/tmp/\n*.draft.md\n.mikke/\n").unwrap();
+    let (stdout, stderr) = run(&root, &["find", "zephyrpenguin"]);
+    let _ = fs::remove_dir_all(&root);
+    assert!(stderr.contains("再構築"), "再構築が走っていない:\n{stderr}");
+    assert!(
+        result_paths(&stdout).contains("scratch/draft.md"),
+        "{stdout}"
+    );
+}
+
+/// .git/info/exclude も読み、.gitignore の `!` で戻せる。
+#[test]
+fn gitignore_info_exclude_and_negation() {
+    let root = gitignore_repo("gi-neg", RESPECT, true);
+    fs::create_dir_all(root.join(".git/info")).unwrap();
+    fs::write(root.join(".git/info/exclude"), "work/\n").unwrap();
+    fs::write(
+        root.join(".gitignore"),
+        "*.draft.md\n!notes/keep.draft.md\n.mikke/\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("notes/keep.draft.md"),
+        "---\ntitle: 残す下書き\n---\nzephyrpenguin\n",
+    )
+    .unwrap();
+    run(&root, &["index"]);
+    let (stdout, _) = run(&root, &["find", "zephyrpenguin"]);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        result_paths(&stdout),
+        set_of(&[
+            "notes/penguin.md",
+            "notes/keep.draft.md",
+            "scratch/draft.md"
+        ]),
+        "{stdout}"
+    );
+}
+
+/// `.git` を持つ下位のディレクトリでは外側の規則を捨てる。入口は外側の規則で判定する。
+#[test]
+fn gitignore_nested_git_repo_boundary() {
+    let root = temp_repo(
+        "gi-nested-git",
+        &[
+            ("mikke.toml", RESPECT),
+            (".gitignore", "secret/\n*.draft.md\nvendor/\n"),
+            ("notes/a.md", NOTE_A),
+            ("secret/x.md", NOTE_S),
+            ("lib/.gitignore", "local/\n"),
+            ("lib/secret/y.md", NOTE_S),
+            ("lib/n.draft.md", NOTE_S),
+            ("lib/local/z.md", NOTE_S),
+            ("vendor/v.md", NOTE_S),
+        ],
+    );
+    for d in [".git", "lib/.git", "vendor/.git"] {
+        fs::create_dir_all(root.join(d)).unwrap();
+    }
+    run(&root, &["index"]);
+    let (stdout, _) = run(&root, &["find", "walrus"]);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        result_paths(&stdout),
+        set_of(&["notes/a.md", "lib/secret/y.md", "lib/n.draft.md"]),
+        "{stdout}"
+    );
+}
+
+/// git repo の外でも異常終了・警告せず、root から下の .gitignore だけを読む。
+#[test]
+fn gitignore_without_git_dir() {
+    let root = gitignore_repo("gi-nogit", RESPECT, false);
+    // 一時フォルダの上に .git があると、その .gitignore も効いて前提が崩れる
+    if root.ancestors().skip(1).any(|a| a.join(".git").exists()) {
+        eprintln!("skip: 一時フォルダの上に .git がある");
+        let _ = fs::remove_dir_all(&root);
+        return;
+    }
+    fs::write(root.join(".gitignore"), "scratch/\n").unwrap();
+    let (code, _, stderr) = index_raw(&root);
+    let (stdout, _) = run(&root, &["find", "zephyrpenguin"]);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(!stderr.contains("Warning"), "警告が出ている:\n{stderr}");
+    let paths = result_paths(&stdout);
+    assert!(paths.contains("notes/penguin.md"), "{stdout}");
+    assert!(!paths.iter().any(|p| p.starts_with("scratch/")), "{stdout}");
+}
+
+/// UTF-8 でない行 (Shift_JIS のコメントなど) があっても、残りの行は効く。
+#[test]
+fn gitignore_non_utf8_line_keeps_rest() {
+    let root = gitignore_repo("gi-nonutf8", RESPECT, true);
+    // "# " + Shift_JIS の「メモ」+ CRLF のあとに規則を並べる
+    let mut bytes = b"# \x83\x81\x83\x82\r\n".to_vec();
+    bytes.extend_from_slice(b"scratch/\r\nwork/tmp/\r\n*.draft.md\r\n.mikke/\r\n");
+    fs::write(root.join(".gitignore"), bytes).unwrap();
+    let (code, _, stderr) = index_raw(&root);
+    let (stdout, _) = run(&root, &["find", "zephyrpenguin"]);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(
+        result_paths(&stdout),
+        set_of(&["notes/penguin.md"]),
+        "{stdout}"
+    );
+}
+
+/// index / embeddings の出力先は配下の .md ファイルだけを外し、出力先の下のネスト repo は今までどおり歩く。
+#[test]
+fn output_dir_does_not_prune_nested_repo() {
+    let root = temp_repo(
+        "out-nested",
+        &[
+            ("mikke.toml", "[index]\nembeddings_dir = \"work\"\n"),
+            ("a.md", NOTE_A),
+            ("work/w.md", NOTE_S),
+            ("work/sub/mikke.toml", ""),
+            ("work/sub/s.md", NOTE_S),
+        ],
+    );
+    run(&root, &["index"]);
+    let (stdout, _) = run(&root, &["find", "walrus"]);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        result_paths(&stdout),
+        set_of(&["a.md", "work/sub/s.md"]),
+        "{stdout}"
+    );
+}
+
+/// root より上の .gitignore も root の下に当てるが、root 自身は判定しない。
+#[test]
+fn gitignore_ancestor_rules_apply_but_root_not_judged() {
+    let top = temp_repo(
+        "gi-ancestor",
+        &[
+            (".gitignore", "notes/scratch/\nnotes/\n"),
+            ("notes/mikke.toml", RESPECT),
+            ("notes/a.md", NOTE_A),
+            ("notes/scratch/x.md", NOTE_S),
+        ],
+    );
+    fs::create_dir_all(top.join(".git")).unwrap();
+    let root = top.join("notes");
+    run(&root, &["index"]);
+    let (stdout, _) = run(&root, &["find", "walrus"]);
+    let _ = fs::remove_dir_all(&top);
+    assert_eq!(result_paths(&stdout), set_of(&["a.md"]), "{stdout}");
+}
+
+/// ネストしたノート repo の中は子の respect_gitignore に従う。親の .gitignore は入口まで効く。
+#[test]
+fn gitignore_nested_mikke_repo_uses_child_setting() {
+    let root = temp_repo(
+        "gi-nested-mikke",
+        &[
+            ("mikke.toml", RESPECT),
+            (".gitignore", "*.draft.md\n"),
+            ("notes/a.md", NOTE_A),
+            ("sub/mikke.toml", "[scan]\n"),
+            ("sub/ok.md", NOTE_S),
+            ("sub/x.draft.md", NOTE_S),
+        ],
+    );
+    fs::create_dir_all(root.join(".git")).unwrap();
+    let paths = |root: &Path| {
+        run(root, &["index"]);
+        result_paths(&run(root, &["find", "walrus"]).0)
+    };
+    assert_eq!(
+        paths(&root),
+        set_of(&["notes/a.md", "sub/ok.md", "sub/x.draft.md"]),
+        "子が書かない respect_gitignore を親から継いでいる"
+    );
+    fs::write(root.join("sub/mikke.toml"), RESPECT).unwrap();
+    assert_eq!(
+        paths(&root),
+        set_of(&["notes/a.md", "sub/ok.md"]),
+        "子の respect_gitignore = true が効いていない"
+    );
+    fs::write(root.join(".gitignore"), "*.draft.md\nsub/\n").unwrap();
+    let got = paths(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        got,
+        set_of(&["notes/a.md"]),
+        "親の .gitignore で入口を塞げない"
+    );
+}
+
+/// include の起点が .gitignore に当たる時も起点ごと外す。
+#[test]
+fn gitignore_include_base_ignored() {
+    let root = gitignore_repo(
+        "gi-include",
+        "[scan]\ninclude = [\".\", \"scratch\"]\nrespect_gitignore = true\n",
+        true,
+    );
+    run(&root, &["index"]);
+    let (stdout, _) = run(&root, &["find", "zephyrpenguin"]);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        result_paths(&stdout),
+        set_of(&["notes/penguin.md"]),
+        "{stdout}"
+    );
+}
+
+/// respect_gitignore の型の違いは exit 2。
+#[test]
+fn gitignore_type_error() {
+    let root = gitignore_repo("gi-type", "[scan]\nrespect_gitignore = \"yes\"\n", true);
+    let (code, _, stderr) = index_raw(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("真偽値"), "{stderr}");
+}
+
+/// issue #57 の再現の木。config は mikke.toml の中身。
+fn exclude_paths_repo(tag: &str, config: &str, extra: &[(&str, &str)]) -> PathBuf {
+    let mut files: Vec<(&str, &str)> = vec![
+        ("mikke.toml", config),
+        ("top.md", "# top\n\nwalrus 直下のノート。\n"),
+        ("notes/a.md", "# a\n\nwalrus 普通のノート。\n"),
+        (
+            "notes/app/state/store.md",
+            "# store\n\nwalrus 状態の設計メモ。\n",
+        ),
+        (
+            "notes/projects/build/log.md",
+            "# log\n\nwalrus 手順の記録。\n",
+        ),
+        (
+            "notes/templates/howto.md",
+            "# howto\n\nwalrus 雛形の使い方。\n",
+        ),
+        ("state/cache/tmp.md", "# tmp\n\nwalrus 一時ファイル。\n"),
+        (
+            "vendor/node_modules/pkg/CHANGELOG.md",
+            "# changelog\n\nwalrus 変更履歴。\n",
+        ),
+    ];
+    files.extend_from_slice(extra);
+    temp_repo(tag, &files)
+}
+
+fn indexed_paths(root: &Path) -> std::collections::BTreeSet<String> {
+    run(root, &["index"]);
+    result_paths(&run(root, &["find", "walrus"]).0)
+}
+
+/// exclude_paths は root 相対の 1 か所だけを外し、exclude_dirs の既定は残る。
+#[test]
+fn exclude_paths_root_relative() {
+    for (i, v) in ["state", "state/", "./state"].iter().enumerate() {
+        let root = exclude_paths_repo(
+            &format!("ep-root-{i}"),
+            &format!("[scan]\nexclude_paths = [\"{v}\"]\n"),
+            &[],
+        );
+        let got = indexed_paths(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(
+            got,
+            set_of(&["top.md", "notes/a.md", "notes/app/state/store.md"]),
+            "{v:?}"
+        );
+    }
+}
+
+/// 判定は要素単位 (state は statement に当たらない)。
+#[test]
+fn exclude_paths_element_wise() {
+    let root = exclude_paths_repo(
+        "ep-element",
+        "[scan]\nexclude_paths = [\"state\"]\n",
+        &[("statement/x.md", "# x\n\nwalrus 声明。\n")],
+    );
+    let got = indexed_paths(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert!(got.contains("statement/x.md"), "{got:?}");
+    assert!(!got.contains("state/cache/tmp.md"), "{got:?}");
+}
+
+/// 深いパスはその場所だけを外し、ファイルを指す値はそのファイルだけを外す。
+#[test]
+fn exclude_paths_deep_and_file() {
+    let root = exclude_paths_repo(
+        "ep-deep",
+        "[scan]\nexclude_paths = [\"notes/app/state\"]\n",
+        &[],
+    );
+    let got = indexed_paths(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        got,
+        set_of(&["top.md", "notes/a.md", "state/cache/tmp.md"]),
+        "{got:?}"
+    );
+
+    let root = exclude_paths_repo("ep-file", "[scan]\nexclude_paths = [\"notes/a.md\"]\n", &[]);
+    let got = indexed_paths(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        got,
+        set_of(&["top.md", "notes/app/state/store.md", "state/cache/tmp.md"]),
+        "{got:?}"
+    );
+}
+
+/// include の起点が exclude_paths の配下なら起点ごと外す (除外は include に勝つ)。
+#[test]
+fn exclude_paths_include_under_excluded() {
+    let root = exclude_paths_repo(
+        "ep-include",
+        "[scan]\ninclude = [\".\", \"state/cache\"]\nexclude_paths = [\"state\"]\n",
+        &[],
+    );
+    let got = indexed_paths(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert!(!got.contains("state/cache/tmp.md"), "{got:?}");
+    assert!(got.contains("top.md"), "{got:?}");
+}
+
+/// ネスト repo の exclude_paths はその repo の root 相対。親の値は入口まで効く。
+#[test]
+fn exclude_paths_nested() {
+    let child_notes: &[(&str, &str)] = &[
+        ("sub/ok.md", "# ok\n\nwalrus 子のノート。\n"),
+        ("sub/state/s.md", "# s\n\nwalrus 子の一時ファイル。\n"),
+    ];
+    let mut extra = child_notes.to_vec();
+    extra.push(("sub/mikke.toml", "[scan]\nexclude_paths = [\"state\"]\n"));
+    let root = exclude_paths_repo("ep-nested-child", "[scan]\n", &extra);
+    let got = indexed_paths(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert!(got.contains("sub/ok.md"), "{got:?}");
+    assert!(!got.contains("sub/state/s.md"), "{got:?}");
+    assert!(got.contains("state/cache/tmp.md"), "{got:?}");
+
+    let mut extra = child_notes.to_vec();
+    extra.push(("sub/mikke.toml", "[scan]\n"));
+    let root = exclude_paths_repo(
+        "ep-nested-parent",
+        "[scan]\nexclude_paths = [\"sub\"]\n",
+        &extra,
+    );
+    let got = indexed_paths(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert!(!got.iter().any(|p| p.starts_with("sub/")), "{got:?}");
+
+    let root = exclude_paths_repo(
+        "ep-nested-inside",
+        "[scan]\nexclude_paths = [\"sub/state\"]\n",
+        &extra,
+    );
+    let (code, _, stderr) = index_raw(&root);
+    let got = result_paths(&run(&root, &["find", "walrus"]).0);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(count_lines(&stderr, "ネストしたノート repo"), 1, "{stderr}");
+    assert!(got.contains("sub/state/s.md"), "{got:?}");
+}
+
+/// 不正な exclude_paths は設定ファイルの path 付きで exit 2。
+#[test]
+fn exclude_paths_invalid_values_exit_2() {
+    for (i, line) in [
+        "exclude_paths = [\"\"]",
+        "exclude_paths = [\".\"]",
+        "exclude_paths = [\"/state\"]",
+        "exclude_paths = [\"C:/state\"]",
+        "exclude_paths = [\"../x\"]",
+        "exclude_paths = [\"a/../b\"]",
+        "exclude_paths = ['state\\cache']",
+        "exclude_paths = [\"a\\tb\"]",
+        "exclude_paths = \"state\"",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let root = temp_repo(
+            &format!("ep-invalid-{i}"),
+            &[
+                ("mikke.toml", &format!("[scan]\n{line}\n")),
+                ("a.md", NOTE_A),
+            ],
+        );
+        let (code, _, stderr) = index_raw(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(code, Some(2), "{line}: {stderr}");
+        assert!(
+            stderr.contains("mikke.toml") && stderr.contains("exclude_paths"),
+            "{line}: {stderr}"
+        );
+    }
+
+    let root = temp_repo(
+        "ep-invalid-child",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            ("a.md", NOTE_A),
+            ("sub/mikke.toml", "[scan]\nexclude_paths = [\"../x\"]\n"),
+            ("sub/b.md", NOTE_S),
+        ],
+    );
+    let (code, _, stderr) = index_raw(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(
+        stderr.contains("sub") && stderr.contains("exclude_paths"),
+        "{stderr}"
+    );
+}
+
+/// exclude_paths の glob の文字は警告にとどめる。
+#[test]
+fn exclude_paths_glob_warns() {
+    let root = temp_repo(
+        "ep-glob",
+        &[
+            ("mikke.toml", "[scan]\nexclude_paths = [\"x/*\"]\n"),
+            ("a.md", NOTE_A),
+        ],
+    );
+    let (code, _, stderr) = index_raw(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stderr.contains("glob として扱いません"), "{stderr}");
+}
+
+/// issue #58 の再現の木。child は work/sub/.mikke.toml の中身。
+fn nested_cfg_repo(tag: &str, child: &str) -> PathBuf {
+    temp_repo(
+        tag,
+        &[
+            ("mikke.toml", "[scan]\ninclude = [\".\"]\n"),
+            ("notes/alpha.md", "---\ntitle: Alpha\n---\nbanana alpha\n"),
+            ("work/beta.md", "---\ntitle: Beta\n---\nbanana beta\n"),
+            (
+                "work/sub/gamma.md",
+                "---\ntitle: Gamma\n---\nbanana gamma\n",
+            ),
+            ("work/sub/.mikke.toml", child),
+        ],
+    )
+}
+
+/// ネスト repo の設定の [health] / [search] / [semantic] は読まず、親を止めない。
+#[test]
+fn nested_config_unused_sections_ignored() {
+    for (i, child) in [
+        "[health]\ndisable = [\"typo\"]\n",
+        "[semantic]\nenabled = \"yes\"\n",
+        "[search]\nbm25_limit = \"50\"\n",
+        "health = 1\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let root = nested_cfg_repo(&format!("nested-unused-{i}"), child);
+        let (code, stdout, stderr) = index_raw(&root);
+        let health = run_raw(&root, &["health"]);
+        let health_err = String::from_utf8_lossy(&health.stderr).into_owned();
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(code, Some(0), "{child}: {stderr}");
+        assert_eq!(note_count(&stdout), Some(3), "{child}: {stdout}");
+        assert_eq!(health.status.code(), Some(0), "{child}: {health_err}");
+        for err in [&stderr, &health_err] {
+            assert!(
+                !err.lines()
+                    .any(|l| l.contains("Warning") && l.contains(".mikke.toml")),
+                "{child}: 子の使わない節で警告している:\n{err}"
+            );
+        }
+    }
+}
+
+/// ネスト repo の [index] の型の違いは path 付きで exit 2。
+#[test]
+fn nested_config_index_type_error_fails() {
+    let root = nested_cfg_repo("nested-index-type", "[index]\nauto_rebuild = \"yes\"\n");
+    let (code, _, stderr) = index_raw(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(
+        stderr.contains(".mikke.toml") && stderr.contains("真偽値"),
+        "{stderr}"
+    );
+}
+
+/// ネスト repo の設定の構文エラーは path 付きで exit 2。
+#[test]
+fn nested_config_syntax_error_fails() {
+    let root = nested_cfg_repo("nested-syntax", "[scan\n");
+    let (code, _, stderr) = index_raw(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains(".mikke.toml"), "{stderr}");
+}
+
+/// ネスト repo の [scan] の未知のキーは子の path で警告し、読まない節は警告しない。
+#[test]
+fn nested_config_unknown_key_warns() {
+    let root = nested_cfg_repo("nested-unknown", "[scan]\nexclude_dir = []\n");
+    let (code, _, stderr) = index_raw(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(
+        stderr
+            .lines()
+            .any(|l| l.contains(".mikke.toml") && l.contains("exclude_dir")),
+        "{stderr}"
+    );
+
+    let root = nested_cfg_repo("nested-unknown-health", "[health]\nwalrus = 1\n");
+    let (code, _, stderr) = index_raw(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(!stderr.contains("Warning"), "{stderr}");
+}

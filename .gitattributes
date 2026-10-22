@@ -1,0 +1,2 @@
+# golden の期待値は LF で比べる (Windows の checkout で CRLF にしない)
+tests/golden/** text eol=lf
