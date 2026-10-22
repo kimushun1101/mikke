@@ -657,6 +657,43 @@ fn auto_rebuild_default_off_keeps_old_index() {
     );
 }
 
+/// [index] path が mikke の index でない既存ファイルを指す時、既定設定の検索は
+/// 形式の確認でそのファイルを作り直さない (md も、meta の無い SQLite も残す)。
+#[test]
+fn format_check_does_not_rebuild_over_non_index_file() {
+    for (tag, sqlite) in [("md", false), ("sqlite", true)] {
+        let root = temp_repo(
+            &format!("format-check-non-index-{tag}"),
+            &[
+                ("mikke.toml", "[index]\npath = \"keep/target.md\"\n"),
+                ("keep/target.md", "# 大事\n\n消えては困る。\n"),
+                ("notes/other.md", "# 別\n\nキリン。\n"),
+            ],
+        );
+        let target = root.join("keep/target.md");
+        if sqlite {
+            fs::remove_file(&target).unwrap();
+            let conn = Connection::open(&target).unwrap();
+            conn.execute("CREATE TABLE other (x TEXT)", []).unwrap();
+            drop(conn);
+        }
+        let before = fs::read(&target).unwrap();
+
+        let out = run_raw(&root, &["find", "キリン"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.contains("再構築"),
+            "{tag}: 索引でないファイルを作り直そうとした:\n{stderr}"
+        );
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            before,
+            "{tag}: [index] path の既存ファイルが書き換わった"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
 /// index_format が無い旧索引は auto_rebuild 未設定でも再構築する。
 #[test]
 fn old_index_format_rebuilds_before_title_search() {
