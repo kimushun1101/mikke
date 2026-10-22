@@ -48,26 +48,35 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// 全文検索 (FTS5 trigram, BM25 順。短語混在時は date 順)
+    /// 全文検索 (FTS5 trigram, BM25 順。短語混在時は簡易スコア順)
     Find {
         #[arg(required = true, value_name = "検索語")]
         words: Vec<String>,
+        /// 件数の上限 (find は既定で [search] bm25_limit、tag / title は既定で全件)
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+        top: Option<u64>,
         /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
         #[arg(long)]
         json: bool,
     },
-    /// タグ検索 (部分一致, date 降順)
+    /// タグ検索 (部分一致, date (空なら updated) 降順)
     Tag {
         #[arg(value_name = "タグ名")]
         keyword: String,
+        /// 件数の上限 (find は既定で [search] bm25_limit、tag / title は既定で全件)
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+        top: Option<u64>,
         /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
         #[arg(long)]
         json: bool,
     },
-    /// タイトル検索 (部分一致, date 降順)
+    /// タイトル検索 (部分一致, date (空なら updated) 降順)
     Title {
         #[arg(value_name = "キーワード")]
         keyword: String,
+        /// 件数の上限 (find は既定で [search] bm25_limit、tag / title は既定で全件)
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+        top: Option<u64>,
         /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
         #[arg(long)]
         json: bool,
@@ -158,9 +167,9 @@ fn main() {
             index::cmd_index(&cfg, check);
             None
         }
-        Command::Find { words, json } => Some(search::cmd_find(&cfg, &words, json)),
-        Command::Tag { keyword, json } => Some(search::cmd_tag(&cfg, &keyword, json)),
-        Command::Title { keyword, json } => Some(search::cmd_title(&cfg, &keyword, json)),
+        Command::Find { words, top, json } => Some(search::cmd_find(&cfg, &words, top, json)),
+        Command::Tag { keyword, top, json } => Some(search::cmd_tag(&cfg, &keyword, top, json)),
+        Command::Title { keyword, top, json } => Some(search::cmd_title(&cfg, &keyword, top, json)),
         Command::ListTags { json } => {
             search::cmd_list_tags(&cfg, json);
             None

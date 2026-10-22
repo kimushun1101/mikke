@@ -3,12 +3,13 @@
 //! FTS 変換 (fts_query): 空白で語分割 → 各語を個別に `"..."` quote (内部 " は "") → AND 連結。
 //! find のクエリは AND 意味論と MATCH/LIKE 経路を保つため正規化しない。
 //! trigram 制約: 各語 3 文字以上なら `ORDER BY rank` (FTS5 BM25)。1 語でも <3 文字を含めば
-//!   LIKE フォールバック (全語 AND で mikke_lower(content/title) LIKE %term%、date 降順、relevance 無し)。
+//!   LIKE フォールバック (全語 AND で mikke_lower(content/title) LIKE %term% で絞り、簡易スコア順)。
 //! find の見出し: 順序を正直に表示。bm25_limit 到達時は打ち切りを明示。
-//! tag/title: 検索列と keyword を正規化した mikke_lower(...) LIKE %kw% 部分一致、date 降順。
+//! tag/title: 検索列と keyword を正規化した mikke_lower(...) LIKE %kw% 部分一致、SORT_KEY 降順。
 //! LIKE の小文字化は列・keyword とも Rust の to_lowercase (SQLite の LOWER は ASCII だけ)。
 //! keyword の `\` `%` `_` は ESCAPE '\' で逃がし、ワイルドカードにしない。
-//! recent: date!='' を date 降順 LIMIT。
+//! recent: SORT_KEY != '' を SORT_KEY 降順 LIMIT。
+//! SORT_KEY は「date、空なら updated」。同じキーは path 昇順。
 //! list-tags: GROUP BY tag ORDER BY COUNT(*) DESC, tag。
 //! hybrid RRF: 各ストリーム top_n*candidate_factor → rank 1 始まり → score += w * 1/(rrf_k+rank)。
 //!   semantic 未構築なら vec 重み 0 で再正規化し BM25 のみへ degrade。via に bm25/vec/bm25+vec。
@@ -31,6 +32,8 @@ pub struct Hit {
     pub path: String,
     pub title: String,
     pub date: String,
+    /// 並びのキーの補い (date が空なら updated で並べる)。空なら ""。
+    pub updated: String,
     pub tags: Vec<String>,
     pub summary: String,
     /// semantic/hybrid のみ。JSON は f64 全精度 (テキスト出力の 4 桁丸めと異なる)。
@@ -48,10 +51,12 @@ struct Meta {
     r#type: &'static str,
     command: &'static str,
     count: usize,
-    /// find のみ: "relevance" (BM25 順) | "date" (短語 fallback の date 降順)。
+    /// find / hybrid のみ: "relevance" (BM25 順) | "approx" (短語 fallback の簡易スコア順)。
+    /// hybrid では BM25 ストリームの順序。
     #[serde(skip_serializing_if = "Option::is_none")]
     order: Option<&'static str>,
-    /// find のみ: bm25_limit 到達による打ち切り (true なら全ヒット数は不明)。
+    /// find / tag / title のみ: 上限 (find は --top か bm25_limit、tag / title は --top) 到達による
+    /// 打ち切り (true なら全ヒット数は不明)。tag / title は --top を付けた時だけ出す。
     #[serde(skip_serializing_if = "Option::is_none")]
     capped: Option<bool>,
     /// hybrid のみ: semantic ストリームが使えず BM25 のみへ degrade したか (未構築・実行時失敗とも)。
@@ -127,6 +132,18 @@ fn escape_like(s: &str) -> String {
     out
 }
 
+/// 並びのキー: date、空なら updated (どちらも無ければ '')。notes を `n` として参照する。
+const SORT_KEY: &str = "COALESCE(NULLIF(n.date, ''), NULLIF(n.updated, ''), '')";
+
+/// Hit 側の並びのキー (SORT_KEY と同じ規則)。
+fn sort_key(hit: &Hit) -> &str {
+    if hit.date.is_empty() {
+        &hit.updated
+    } else {
+        &hit.date
+    }
+}
+
 /// 検索系コマンド用の接続。auto_rebuild 有効なら stale 時に全再構築してから開く。
 pub fn connect(cfg: &Config) -> Connection {
     index::ensure_index(cfg);
@@ -147,10 +164,11 @@ fn fetch_notes(conn: &Connection, paths: &[String]) -> Vec<Hit> {
     }
     let placeholders = vec!["?"; paths.len()].join(",");
 
-    let sql =
-        format!("SELECT path, title, date, summary FROM notes WHERE path IN ({placeholders})");
+    let sql = format!(
+        "SELECT path, title, date, updated, summary FROM notes WHERE path IN ({placeholders})"
+    );
     let mut stmt = conn.prepare(&sql).expect("notes SELECT の準備に失敗");
-    let mut row_map: HashMap<String, (String, String, String)> = HashMap::new();
+    let mut row_map: HashMap<String, (String, String, String, String)> = HashMap::new();
     let rows = stmt
         .query_map(params_from_iter(paths.iter()), |r| {
             Ok((
@@ -158,14 +176,20 @@ fn fetch_notes(conn: &Connection, paths: &[String]) -> Vec<Hit> {
                 r.get::<_, String>(1)?,
                 r.get::<_, Option<String>>(2)?,
                 r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
             ))
         })
         .expect("notes SELECT に失敗");
     for row in rows.flatten() {
-        let (path, title, date, summary) = row;
+        let (path, title, date, updated, summary) = row;
         row_map.insert(
             path,
-            (title, date.unwrap_or_default(), summary.unwrap_or_default()),
+            (
+                title,
+                date.unwrap_or_default(),
+                updated.unwrap_or_default(),
+                summary.unwrap_or_default(),
+            ),
         );
     }
 
@@ -183,13 +207,14 @@ fn fetch_notes(conn: &Connection, paths: &[String]) -> Vec<Hit> {
 
     let mut out = Vec::new();
     for p in paths {
-        let Some((title, date, summary)) = row_map.get(p) else {
+        let Some((title, date, updated, summary)) = row_map.get(p) else {
             continue;
         };
         out.push(Hit {
             path: p.clone(),
             title: title.clone(),
             date: date.clone(),
+            updated: updated.clone(),
             summary: summary.clone(),
             tags: tag_map.get(p).cloned().unwrap_or_default(),
             score: None,
@@ -252,6 +277,16 @@ fn query_paths(conn: &Connection, sql: &str, param: &str) -> Vec<String> {
     rows.flatten().collect()
 }
 
+/// query_paths に件数の上限を足したもの。`?2` に上限 (None なら -1 = 無制限) を渡す。
+fn query_paths_top(conn: &Connection, sql: &str, param: &str, top: Option<u64>) -> Vec<String> {
+    let limit = top.map_or(-1, |n| n as i64);
+    let mut stmt = conn.prepare(sql).expect("SELECT の準備に失敗");
+    let rows = stmt
+        .query_map(params![param, limit], |r| r.get::<_, String>(0))
+        .expect("SELECT に失敗");
+    rows.flatten().collect()
+}
+
 /// 前後を trim して検索用 LIKE pattern を作る。空白だけなら元の keyword を使う。
 fn like_pattern(keyword: &str) -> String {
     let trimmed = keyword.trim();
@@ -262,50 +297,77 @@ fn like_pattern(keyword: &str) -> String {
     )
 }
 
-pub fn cmd_tag(cfg: &Config, keyword: &str, json: bool) -> usize {
+/// tag / title の --top による打ち切り (find と同じ count >= N の保守的判定)。
+fn top_capped(top: Option<u64>, count: usize) -> Option<bool> {
+    top.map(|n| count as u64 >= n)
+}
+
+/// 打ち切りの見出しの注記 (find と同じ文言)。
+fn capped_note(capped: bool, limit: impl std::fmt::Display) -> String {
+    if capped {
+        format!(" ※上限到達: 上位{limit}件で打ち切り (全ヒット数は不明)")
+    } else {
+        String::new()
+    }
+}
+
+pub fn cmd_tag(cfg: &Config, keyword: &str, top: Option<u64>, json: bool) -> usize {
     let conn = connect(cfg);
-    let paths = query_paths(
-        &conn,
-        "SELECT DISTINCT n.path
-         FROM tags t JOIN notes n ON t.path = n.path
-         WHERE mikke_lower(t.tag_search) LIKE ?1 ESCAPE '\\'
-         ORDER BY n.date DESC",
-        &like_pattern(keyword),
+    let sql = format!(
+        "SELECT n.path
+         FROM notes n
+         WHERE n.path IN (SELECT t.path FROM tags t WHERE mikke_lower(t.tag_search) LIKE ?1 ESCAPE '\\')
+         ORDER BY {SORT_KEY} DESC, n.path
+         LIMIT ?2"
     );
+    let paths = query_paths_top(&conn, &sql, &like_pattern(keyword), top);
     if paths.is_empty() {
         // 0 件 early-return 経路。JSON でもメタ行は必ず出す (exit code は main 側で 1)。
         if json {
-            print_json(&Meta::new("tag", 0));
+            let mut meta = Meta::new("tag", 0);
+            meta.capped = top_capped(top, 0);
+            print_json(&meta);
         } else {
             println!("タグ '{keyword}' に一致するノートが見つかりませんでした。");
         }
         return 0;
     }
     let notes = fetch_notes(&conn, &paths);
+    let capped = top_capped(top, notes.len());
     if json {
-        print_json(&Meta::new("tag", notes.len()));
+        let mut meta = Meta::new("tag", notes.len());
+        meta.capped = capped;
+        print_json(&meta);
     } else {
-        println!("タグ '{keyword}' の検索結果 ({}件):\n", notes.len());
+        let note = capped_note(capped == Some(true), top.unwrap_or(0));
+        println!("タグ '{keyword}' の検索結果 ({}件){note}:\n", notes.len());
     }
     print_notes(&notes, json);
     notes.len()
 }
 
-pub fn cmd_title(cfg: &Config, keyword: &str, json: bool) -> usize {
+pub fn cmd_title(cfg: &Config, keyword: &str, top: Option<u64>, json: bool) -> usize {
     let conn = connect(cfg);
-    let paths = query_paths(
-        &conn,
+    let sql = format!(
         "SELECT n.path
          FROM notes_fts f JOIN notes n ON f.path = n.path
          WHERE mikke_lower(f.title) LIKE ?1 ESCAPE '\\'
-         ORDER BY n.date DESC",
-        &like_pattern(keyword),
+         ORDER BY {SORT_KEY} DESC, n.path
+         LIMIT ?2"
     );
+    let paths = query_paths_top(&conn, &sql, &like_pattern(keyword), top);
     let notes = fetch_notes(&conn, &paths);
+    let capped = top_capped(top, notes.len());
     if json {
-        print_json(&Meta::new("title", notes.len()));
+        let mut meta = Meta::new("title", notes.len());
+        meta.capped = capped;
+        print_json(&meta);
     } else {
-        println!("タイトル '{keyword}' の検索結果 ({}件):\n", notes.len());
+        let note = capped_note(capped == Some(true), top.unwrap_or(0));
+        println!(
+            "タイトル '{keyword}' の検索結果 ({}件){note}:\n",
+            notes.len()
+        );
     }
     print_notes(&notes, json);
     notes.len()
@@ -335,7 +397,7 @@ fn fts_query(keyword: &str) -> String {
 /// 短語 (<3 文字) を 1 語でも含めば LIKE フォールバック。判定は語ごと。
 fn bm25_ranked_paths(conn: &Connection, keyword: &str, limit: i64) -> Vec<String> {
     let terms = split_terms(keyword);
-    if terms.iter().all(|t| t.chars().count() >= 3) {
+    if is_match_path(keyword) {
         // FTS5 の特殊カラム `rank` = BM25 (重みデフォルト)。昇順で関連度が高い順。
         let mut stmt = conn
             .prepare("SELECT path FROM notes_fts WHERE notes_fts MATCH ?1 ORDER BY rank LIMIT ?2")
@@ -358,51 +420,125 @@ fn bm25_ranked_paths(conn: &Connection, keyword: &str, limit: i64) -> Vec<String
             like_params.push(like.clone());
             like_params.push(like);
         }
+        // 全候補を読み、簡易スコアで並べてから limit で切る (date で並べてから切ると古い本命が落ちる)
         let sql = format!(
-            "SELECT n.path
+            "SELECT n.path, mikke_lower(f.title), mikke_lower(f.content), {SORT_KEY}
              FROM notes_fts f JOIN notes n ON f.path = n.path
-             WHERE {}
-             ORDER BY n.date DESC
-             LIMIT {limit}",
+             WHERE {}",
             clauses.join(" AND ")
         );
         let mut stmt = conn.prepare(&sql).expect("LIKE SELECT の準備に失敗");
         let rows = stmt
             .query_map(params_from_iter(like_params.iter()), |r| {
-                r.get::<_, String>(0)
+                Ok(LikeCandidate {
+                    path: r.get(0)?,
+                    title: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    content: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    key: r.get(3)?,
+                })
             })
             .expect("LIKE SELECT に失敗");
-        rows.flatten().collect()
+        let lowered: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
+        rank_like_candidates(&lowered, rows.flatten().collect(), limit)
     }
 }
 
-pub fn cmd_find(cfg: &Config, words: &[String], json: bool) -> usize {
+/// LIKE フォールバックの候補 1 件 (title / content は mikke_lower 済み、key は SORT_KEY)。
+struct LikeCandidate {
+    path: String,
+    title: String,
+    content: String,
+    key: String,
+}
+
+/// 簡易スコアの定数。BM25 の tf の飽和と文書長の正規化だけを取り、idf は使わない
+/// (全候補が全語を含むので、候補の中では idf が同じになる)。
+const LIKE_K1: f64 = 1.2;
+const LIKE_B: f64 = 0.75;
+/// title に語を含む時の加点 (語ごと)。
+const LIKE_TITLE_BONUS: f64 = 1.0;
+
+/// 候補を簡易スコア降順 → SORT_KEY 降順 → path 昇順に並べ、上位 limit 件の path を返す。
+/// terms は小文字化済み。本文の長さは候補の平均で正規化する。
+fn rank_like_candidates(terms: &[String], cands: Vec<LikeCandidate>, limit: i64) -> Vec<String> {
+    let lens: Vec<f64> = cands
+        .iter()
+        .map(|c| c.content.chars().count() as f64)
+        .collect();
+    let avg = if lens.is_empty() {
+        1.0
+    } else {
+        (lens.iter().sum::<f64>() / lens.len() as f64).max(1.0)
+    };
+    let mut scored: Vec<(f64, LikeCandidate)> = cands
+        .into_iter()
+        .zip(lens)
+        .map(|(c, len)| {
+            let norm = LIKE_K1 * (1.0 - LIKE_B + LIKE_B * len / avg);
+            let mut score = 0.0;
+            for t in terms.iter().filter(|t| !t.is_empty()) {
+                let tf = c.content.matches(t.as_str()).count() as f64;
+                if tf > 0.0 {
+                    score += tf * (LIKE_K1 + 1.0) / (tf + norm);
+                }
+                if c.title.contains(t.as_str()) {
+                    score += LIKE_TITLE_BONUS;
+                }
+            }
+            (score, c)
+        })
+        .collect();
+    scored.sort_by(|(sa, a), (sb, b)| {
+        sb.partial_cmp(sa)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.key.cmp(&a.key))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    scored
+        .into_iter()
+        .take(limit.max(0) as usize)
+        .map(|(_, c)| c.path)
+        .collect()
+}
+
+/// bm25_ranked_paths の順序の種別 (JSON の order)。
+fn bm25_order(relevance: bool) -> &'static str {
+    if relevance {
+        "relevance"
+    } else {
+        "approx"
+    }
+}
+
+/// keyword が MATCH 経路 (全語 3 文字以上) に入るか。
+fn is_match_path(keyword: &str) -> bool {
+    split_terms(keyword).iter().all(|t| t.chars().count() >= 3)
+}
+
+pub fn cmd_find(cfg: &Config, words: &[String], top: Option<u64>, json: bool) -> usize {
     // 複数語は全語結合 (無クォートの複数語でも語落ちしない)。
     let keyword = words.join(" ");
     let conn = connect(cfg);
-    let limit = cfg.bm25_limit;
+    // --top は bm25_limit の代わり (bm25_limit は既定値であって天井ではない)
+    let limit = top.map_or(cfg.bm25_limit, |n| n as i64);
     let paths = bm25_ranked_paths(&conn, &keyword, limit);
     let notes = fetch_notes(&conn, &paths);
-    // 短語 (<3字) を含むと trigram 不可で LIKE フォールバック (date 降順)。順序の正体を正直に出す。
-    let relevance = split_terms(&keyword).iter().all(|t| t.chars().count() >= 3);
+    // 短語 (<3字) を含むと trigram 不可で LIKE フォールバック (簡易スコア順)。順序の正体を正直に出す。
+    let relevance = is_match_path(&keyword);
     // 上限に達した場合は「全体がこの件数」と誤読されないよう打ち切りを明示する。
     let capped = notes.len() as i64 >= limit;
     if json {
         let mut meta = Meta::new("find", notes.len());
-        meta.order = Some(if relevance { "relevance" } else { "date" });
+        meta.order = Some(bm25_order(relevance));
         meta.capped = Some(capped);
         print_json(&meta);
     } else {
         let order = if relevance {
             "BM25 relevance 順"
         } else {
-            "date 降順 (短語を含み relevance 算出不可)"
+            "簡易スコア順 (短語を含み BM25 算出不可)"
         };
-        let capped_str = if capped {
-            format!(" ※上限到達: 上位{limit}件で打ち切り (全ヒット数は不明)")
-        } else {
-            String::new()
-        };
+        let capped_str = capped_note(capped, limit);
         println!(
             "全文検索 '{keyword}' の結果 ({}件, {order}){capped_str}:\n",
             notes.len()
@@ -444,9 +580,10 @@ pub fn cmd_list_tags(cfg: &Config, json: bool) {
 
 pub fn cmd_recent(cfg: &Config, count: usize, json: bool) {
     let conn = connect(cfg);
-    let mut stmt = conn
-        .prepare("SELECT path FROM notes WHERE date != '' ORDER BY date DESC LIMIT ?1")
-        .expect("recent SELECT の準備に失敗");
+    let sql = format!(
+        "SELECT n.path FROM notes n WHERE {SORT_KEY} != '' ORDER BY {SORT_KEY} DESC, n.path LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql).expect("recent SELECT の準備に失敗");
     let paths: Vec<String> = stmt
         .query_map(params![count as i64], |r| r.get::<_, String>(0))
         .expect("recent SELECT に失敗")
@@ -596,8 +733,8 @@ pub fn cmd_backlinks(cfg: &Config, note: &str) -> usize {
         }
     }
     let mut notes = fetch_notes(&conn, &sources);
-    // tag/title と同じ date 降順 (date 空は末尾)、同 date は path 昇順で決定的に
-    notes.sort_by(|a, b| b.date.cmp(&a.date).then(a.path.cmp(&b.path)));
+    // tag/title と同じ SORT_KEY 降順 (キーが空なら末尾)、同じキーは path 昇順で決定的に
+    notes.sort_by(|a, b| sort_key(b).cmp(sort_key(a)).then(a.path.cmp(&b.path)));
     println!("'{path}' の被リンク ({}件):\n", notes.len());
     print_notes(&notes, false);
     notes.len()
@@ -746,8 +883,10 @@ pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize, json: bool) -> usize {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    let relevance = is_match_path(query);
     if json {
         let mut meta = Meta::new("hybrid", notes.len());
+        meta.order = Some(bm25_order(relevance));
         meta.degraded = Some(!has_vector);
         print_json(&meta);
     } else {
@@ -756,7 +895,13 @@ pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize, json: bool) -> usize {
         } else {
             "BM25 のみ (semantic 未構築)"
         };
-        println!("ハイブリッド検索 '{query}' の結果 (上位{top}件, {mode}):\n");
+        // BM25 ストリームが簡易スコア順の時はそれを示す (find の見出しと同じく順序の正体を出す)
+        let approx = if relevance {
+            ""
+        } else {
+            ", BM25 は簡易スコア順 (短語を含む)"
+        };
+        println!("ハイブリッド検索 '{query}' の結果 (上位{top}件, {mode}{approx}):\n");
     }
     print_notes(&notes, json);
     notes.len()
@@ -765,6 +910,45 @@ pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize, json: bool) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cand(path: &str, title: &str, content: &str, key: &str) -> LikeCandidate {
+        LikeCandidate {
+            path: path.into(),
+            title: title.into(),
+            content: content.into(),
+            key: key.into(),
+        }
+    }
+
+    /// 簡易スコア: 本文が短く全語を繰り返し含むノートが、長く散発的に含むノートより上に来る。
+    /// 同点は SORT_KEY 降順 → path 昇順。
+    #[test]
+    fn like_score_prefers_dense_short_notes_and_breaks_ties() {
+        let long = format!("{}巣箱 野鳥 巣箱 野鳥", "池のカモを数えた。".repeat(200));
+        let dense = "巣箱に野鳥が来た。巣箱の野鳥を数えた。";
+        let terms = vec!["巣箱".to_string(), "野鳥".to_string()];
+        let ranked = rank_like_candidates(
+            &terms,
+            vec![
+                cand("long.md", "記録", &long, "2026-05-01"),
+                cand("dense.md", "記録", dense, "2020-01-01"),
+                cand("b.md", "同点", "巣箱 野鳥", "2024-01-01"),
+                cand("a.md", "同点", "巣箱 野鳥", "2024-01-01"),
+                cand("c.md", "同点", "巣箱 野鳥", "2025-01-01"),
+            ],
+            10,
+        );
+        let pos = |p: &str| ranked.iter().position(|x| x == p).unwrap();
+        assert!(pos("dense.md") < pos("long.md"), "{ranked:?}");
+        assert!(
+            pos("c.md") < pos("a.md") && pos("a.md") < pos("b.md"),
+            "{ranked:?}"
+        );
+        assert_eq!(
+            rank_like_candidates(&terms, vec![cand("x.md", "", "巣箱", "")], 0).len(),
+            0
+        );
+    }
 
     /// 成分末尾一致は `/` 境界で切る — 文字列 suffix 一致 (`[[note]]` が
     /// `notes/my-note.md` に当たる類の偽陽性) を否定する。

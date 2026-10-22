@@ -10,13 +10,13 @@ mikke の挙動の正本。CLI 表面・設定キー・出力の意味は安定�
 |---|---|---|
 | `index` | `--check` | index 全再構築。`--check` は frontmatter 破損・tags 空要素があれば exit 1(CI 用) |
 | `embed` | `--force` | 埋め込み差分更新(`--force` で全件)。semantic feature 必須 |
-| `find` | `<検索語...> --json` | 全文検索(FTS5 trigram, BM25 順。短語混在時は LIKE fallback/date 順) |
-| `tag` | `<タグ名> --json` | タグ部分一致検索(date 降順) |
-| `title` | `<キーワード> --json` | タイトル部分一致検索(date 降順) |
+| `find` | `<検索語...> --top N --json` | 全文検索(FTS5 trigram, BM25 順。短語混在時は LIKE fallback/簡易スコア順)。`--top` 未指定は `bm25_limit` 件まで |
+| `tag` | `<タグ名> --top N --json` | タグ部分一致検索(date (空なら updated) 降順)。`--top` 未指定は全件 |
+| `title` | `<キーワード> --top N --json` | タイトル部分一致検索(date (空なら updated) 降順)。`--top` 未指定は全件 |
 | `semantic` | `<クエリ...> --top N(=5) --json` | 意味検索(cosine 類似度順) |
 | `hybrid` | `<クエリ...> --top N(=5) --json` | BM25 + semantic の RRF 融合 |
 | `list-tags` | `--json` | タグ一覧(使用回数降順、同数は tag 名昇順) |
-| `recent` | `[件数(=10)] --json` | date 降順の最近ノート(date 空は除外) |
+| `recent` | `[件数(=10)] --json` | date (空なら updated) 降順の最近ノート(どちらも空なら除外) |
 | `links` | `<ノート>` | 発リンク一覧(wikilink target をノートへ解決して表示、未解決は明示) |
 | `backlinks` | `<ノート>` | 被リンク一覧(対象ノートを指しうる target を持つノート) |
 | `health` | `--md-report PATH` | 健全性チェック(決定的 md レポート出力可) |
@@ -67,7 +67,7 @@ query_prefix = "query: "
 passage_prefix = "passage: "
 
 [search]
-bm25_limit = 50                        # find の取得上限
+bm25_limit = 50                        # --top 未指定時の find の取得上限
 rrf_k = 60
 bm25_weight = 0.4
 vector_weight = 0.6
@@ -147,11 +147,13 @@ stale 判定は次のいずれか: (a) いずれかの md の mtime が `meta['g
 
 - **FTS 変換 (`fts_query`)**: 空白で語分割し、各語を個別に `"..."` quote して `AND` 連結。入力全体を 1 つの quote で囲むと連続一致要求で 0 件化するため**語ごと quote が必須**。内部の `"` は `""` にエスケープ。
 - **和欧間スペース**: `find` はクエリを正規化せず、空白入りクエリの AND 意味論と語長による MATCH / LIKE 選択を維持する。`title` は正規化済み `notes_fts.title` に対してキーワード全体を同じ規則で正規化して LIKE 検索する。`tag` は `tag_search` とキーワードの両方を正規化して比較し、表示には原文の `tag` を使う。
-- **trigram 制約**: FTS5 trigram は各語 3 文字以上必須。**語ごとに**長さ判定し、1 語でも 3 文字未満を含む場合は LIKE フォールバック(全語 AND、`mikke_lower(content/title) LIKE %term%`、date 降順、relevance 無し)。全語 3 文字以上なら `ORDER BY rank`(FTS5 の BM25)。
-- **find の順序表示**: BM25 順か「date 降順(短語で relevance 算出不可)」かを**正直に出す**。`bm25_limit` 到達時は「上位 N 件で打ち切り(全ヒット数不明)」と明示(打ち切りを全件数と誤読させない)。
-- **tag/title**: 正規化したキーワードによる `mikke_lower(...) LIKE %kw%` 部分一致、date 降順。
+- **trigram 制約**: FTS5 trigram は各語 3 文字以上必須。**語ごとに**長さ判定し、1 語でも 3 文字未満を含む場合は LIKE フォールバック(全語 AND の `mikke_lower(content/title) LIKE %term%` で絞り、簡易スコア順)。全語 3 文字以上なら `ORDER BY rank`(FTS5 の BM25)。
+- **簡易スコア**(LIKE フォールバック): 全候補を読み、語ごとに BM25 の tf の項(本文での出現回数の飽和と、候補の平均に対する本文長の正規化。k1 = 1.2、b = 0.75)を足し、title に語を含めば語ごとに 1 点を足す。idf は使わない(全候補が全語を含むため)。スコア降順 → date (空なら updated) 降順 → path 昇順に並べてから上限で切る(date で並べてから切ると、古い本命が圏外に落ちるため)。
+- **find の順序表示**: BM25 順か「簡易スコア順(短語を含み BM25 算出不可)」かを**正直に出す**。上限(`--top`、未指定なら `bm25_limit`)到達時は「上位 N 件で打ち切り(全ヒット数不明)」と明示(打ち切りを全件数と誤読させない)。`--top` は `bm25_limit` より大きくてもよい(`bm25_limit` は既定値で天井ではない)。`--top` は 1 以上。
+- **tag/title**: 正規化したキーワードによる `mikke_lower(...) LIKE %kw%` 部分一致、date (空なら updated) 降順、同じキーは path 昇順。`--top N` で N 件に打ち切る。N 件に達したら find と同じ打ち切りの注記を見出しに付ける。
+- **並びのキー**(tag / title / recent / backlinks と簡易スコアの同点): `date`、空なら `updated`(SQL では `COALESCE(NULLIF(date, ''), NULLIF(updated, ''), '')`)。date を書いたノートの並びは変わらず、date が空で updated のあるノートだけがその日付で並ぶ。どちらも空なら末尾。
 - **LIKE の比べ方**(tag / title / find の LIKE フォールバック): 列とキーワードの両方を Rust の `to_lowercase` で小文字にして比べる(`mikke_lower` は検索の接続に登録する関数。SQLite の `LOWER` は ASCII しか変えないため使わない)。ASCII 以外の大文字小文字(`Ä` と `ä`、全角の `Ｇ` と `ｇ`)も同一視し、MATCH 経路と揃う。全角と半角は同一視しない。キーワードの `%` `_` `\` は `ESCAPE '\'` で逃がし、ワイルドカードでなく文字そのものに当てる。
-- **recent**: `date != ''` を date 降順で LIMIT。
+- **recent**: 並びのキーが空でないノートを、キーの降順(同じキーは path 昇順)で LIMIT。
 - **list-tags**: `GROUP BY tag ORDER BY COUNT(*) DESC, tag`。
 - **semantic**: クエリを `query_prefix + query` で encode(normalize)、保存ベクトルとの内積(= 正規化済 cosine)で降順 top_n。**モデル/prefix は保存 metadata を優先**(生成時とエンコード条件を揃える)。
 - **hybrid (RRF)**: 各ストリームから `top_n * candidate_factor` 取得 → rank を 1 始まりで付与 → `score += weight * 1/(rrf_k + rank)`。semantic 未構築時は vector 重み 0 で**再正規化**し BM25 のみへ degrade(`semantic.enabled` が true なら Note を stderr へ)。結果に `via`(bm25 / vec / bm25+vec)と score を表示。
@@ -179,7 +181,7 @@ index の links テーブル(wikilink の生 target — 「ノートの解釈」
 ### 出力と件数
 
 - **links**: 見出し `'<path>' の発リンク (target N件, 解決 R件 / 未解決 U件):`。N = 対象 target 数(`[[#anchor]]` を除く。N = R + U)。解決したノートを target 昇順(同一 target の複数一致は path 昇順、同一ノートへの重複 target は 1 回)でテキスト形式(「出力フォーマット」)で表示し、続けて未解決 target を `  (未解決) [[<生 target>]]` の 1 行ずつで列挙する。N = 0 なら「wikilink がありません。」
-- **backlinks**: 見出し `'<path>' の被リンク (N件):`。N = 対象ノートを指しうる target を持つノート数。date 降順(date 空は末尾、同 date は path 昇順)でテキスト形式で表示。0 件は「該当するノートが見つかりませんでした。」
+- **backlinks**: 見出し `'<path>' の被リンク (N件):`。N = 対象ノートを指しうる target を持つノート数。並びのキー(date、空なら updated)の降順(キーが空なら末尾、同じキーは path 昇順)でテキスト形式で表示。0 件は「該当するノートが見つかりませんでした。」
 - exit code は「exit code」参照(結果 1 件以上 = 0 / 結果 0 件 = 1 / `<note>` 引数が解決できない = 2)
 
 ## 出力フォーマット
@@ -203,8 +205,8 @@ score/via は semantic/hybrid のみ。**summary 欠落を空白で黙らせな�
 
 **保証**: JSON モードの stdout には JSON Lines 以外を出さない。auto-build の告知・hybrid degrade の Note・Warning 類は従来どおり stderr のため、clone 直後の初回実行でも安全にパイプできる。
 
-- **メタ行(常に 1 行目)**: `{"type":"meta","command":"<サブコマンド名>","count":N}`。テキスト見出しが持つ情報を JSON でも失わないため、find は `"order"`(`"relevance"` = BM25 順 / `"date"` = 短語 fallback の date 降順)と `"capped"`(`bm25_limit` 到達 = true。ちょうど limit 件で打ち切りが無い場合も true になる保守的判定 — テキスト出力の打ち切り表示と同一条件。true のとき count を全ヒット数と誤読しない)を必ず含み、hybrid は `"degraded"`(semantic ストリームが使えず BM25 のみになった場合に true。埋め込み未構築のほか、構築済みでも semantic 検索の実行時失敗で true になる)を必ず含む。0 件時はメタ行のみ(hit 行 0 行)
-- **hit 行(2 行目以降、1 件 1 行)**: `{"path":"...","title":"...","date":"...","tags":["a","b"],"summary":"...","score":0.0123,"via":"bm25+vec"}`。`type` フィールドは付けない。score は semantic/hybrid のみ、via は hybrid のみ(semantic は via を設定しない)。summary 空は `""` のまま(テキスト出力の sentinel 文は出さない — JSON では空文字列が欠落の明示になる)。score は f64 全精度で、テキスト出力の 4 桁丸めとは表記が異なる
+- **メタ行(常に 1 行目)**: `{"type":"meta","command":"<サブコマンド名>","count":N}`。テキスト見出しが持つ情報を JSON でも失わないため、find は `"order"`(`"relevance"` = BM25 順 / `"approx"` = 短語 fallback の簡易スコア順。v0.4.1 までは短語 fallback を date 降順に並べ `"date"` を出していた)と `"capped"`(上限 = `--top` か `bm25_limit` 到達 = true。ちょうど limit 件で打ち切りが無い場合も true になる保守的判定 — テキスト出力の打ち切り表示と同一条件。true のとき count を全ヒット数と誤読しない)を必ず含む。tag / title は `--top` を付けた時だけ `"capped"`(判定は find と同じ)を含む。hybrid は BM25 ストリームの順序を find と同じ値の `"order"` で、`"degraded"`(semantic ストリームが使えず BM25 のみになった場合に true。埋め込み未構築のほか、構築済みでも semantic 検索の実行時失敗で true になる)を必ず含む。0 件時はメタ行のみ(hit 行 0 行)
+- **hit 行(2 行目以降、1 件 1 行)**: `{"path":"...","title":"...","date":"...","updated":"...","tags":["a","b"],"summary":"...","score":0.0123,"via":"bm25+vec"}`。`type` フィールドは付けない。score は semantic/hybrid のみ、via は hybrid のみ(semantic は via を設定しない)。updated と summary の空は `""` のまま(テキスト出力の sentinel 文は出さない — JSON では空文字列が欠落の明示になる)。score は f64 全精度で、テキスト出力の 4 桁丸めとは表記が異なる
 - **list-tags**: メタ行(count = タグ数)+ `{"tag":"...","count":N}` を 1 タグ 1 行
 - **スキーマ安定性**: `--json` の出力も安定インターフェース。フィールド追加は互換、既存フィールドの改名・削除・意味変更は breaking
 
