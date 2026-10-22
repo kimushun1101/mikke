@@ -43,6 +43,7 @@ cargo install --git https://github.com/kimushun1101/mikke --locked
 cd <ノートフォルダ>
 mikke index               # index 生成 (初回は検索時に自動生成される)
 mikke find 検索 語        # 全文検索 (BM25 順)
+mikke find 検索 --top 5   # 件数を絞る (find / tag / title)
 mikke tag タグ名         # タグ検索
 mikke title キーワード     # タイトル検索
 mikke recent 10           # 最近のノート

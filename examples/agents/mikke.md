@@ -17,7 +17,7 @@
 - `.mikke/` 配下は検索用の内部データ (index 等の binary)。直接読まず、検索は必ず mikke コマンド経由で行う
 - ヒットの title/tags/summary で当たりを付け、必要なノートだけ path を開いて読む。全件読み禁止
 - find の対象は title + 本文のみ。tags/summary だけの語は find に当たらない (`tag` / `title` で引く)
-- 複数語は各語 phrase quote の AND 連結。全語共起が必要で、語を増やすほど絞られる。3 文字未満の語が混ざると relevance 無しの date 降順 (出力に明示される)
+- 複数語は各語 phrase quote の AND 連結。全語共起が必要で、語を増やすほど絞られる。3 文字未満の語が混ざると BM25 でなく簡易スコア順 (出力に明示される)。件数は `--top N` で絞れる
 - 固有名詞・型番 → `find`。自然文・概念的な問い → `hybrid` (全語共起が稀で find は空振りしやすい)
 - 検索系 (find/tag/title/semantic/hybrid) の exit code は grep 慣習: ヒットあり = 0 / 0 件 = 1 / エラー = 2。ヒット有無は出力文言でなく exit code で判定する
 - 出力を機械的にパースする時は `--json` (JSON Lines: 1 行目メタ行 + 1 件 1 行。exit code は同じ)。整形テキストの逆パースはしない

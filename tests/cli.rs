@@ -372,6 +372,236 @@ fn like_escapes_wildcards() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// 検索結果の `path:` 行を出た順に返す。
+fn hit_paths_in_order(root: &Path, args: &[&str]) -> Vec<String> {
+    let out = run_raw(root, args);
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("path: ").map(str::to_string))
+        .collect()
+}
+
+/// `--json` のメタ行 (1 行目) を読む。
+fn json_meta(root: &Path, args: &[&str]) -> serde_json::Value {
+    let out = run_raw(root, args);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    serde_json::from_str(stdout.lines().next().unwrap_or(""))
+        .unwrap_or_else(|e| panic!("{args:?} のメタ行を読めない ({e}):\n{stdout}"))
+}
+
+/// find / title / tag の `--top N` は件数を絞り、打ち切りを見出しとメタ行で示す (#73)。
+#[test]
+fn top_limits_find_title_tag() {
+    let mut files: Vec<(String, String)> = vec![("mikke.toml".into(), String::new())];
+    for i in 1..=60 {
+        files.push((
+            format!("notes/memo-{i:02}.md"),
+            format!("---\ntitle: 観察メモ {i:02}\ndate: 2026-01-01\ntags: [bird]\n---\n巣箱を見回った。\n"),
+        ));
+    }
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let root = temp_repo("top-option", &refs);
+    run(&root, &["index"]);
+
+    let count = |args: &[&str]| hit_paths(&root, args).len();
+    assert_eq!(count(&["find", "見回った", "--top", "5"]), 5);
+    assert_eq!(count(&["find", "見回った"]), 50);
+    assert_eq!(count(&["find", "見回った", "--top", "100"]), 60);
+    assert_eq!(count(&["title", "観察", "--top", "5"]), 5);
+    assert_eq!(count(&["tag", "bird", "--top", "5"]), 5);
+    assert_eq!(count(&["title", "観察"]), 60);
+    assert_eq!(count(&["tag", "bird"]), 60);
+    assert_eq!(count(&["title", "観察", "--top", "100"]), 60);
+    // 同じ date は path 昇順で、上位 N 件が決まる
+    assert_eq!(
+        hit_paths_in_order(&root, &["title", "観察", "--top", "2"]),
+        vec!["notes/memo-01.md", "notes/memo-02.md"]
+    );
+
+    let (head, _) = run(&root, &["title", "観察", "--top", "5"]);
+    assert!(
+        head.starts_with(
+            "タイトル '観察' の検索結果 (5件) ※上限到達: 上位5件で打ち切り (全ヒット数は不明):"
+        ),
+        "{head}"
+    );
+    let (head, _) = run(&root, &["title", "観察"]);
+    assert!(!head.contains("上限到達"), "{head}");
+
+    let meta = json_meta(&root, &["find", "見回った", "--top", "5", "--json"]);
+    assert_eq!(
+        (meta["count"].as_u64(), meta["capped"].as_bool()),
+        (Some(5), Some(true))
+    );
+    let meta = json_meta(&root, &["find", "見回った", "--top", "100", "--json"]);
+    assert_eq!(
+        (meta["count"].as_u64(), meta["capped"].as_bool()),
+        (Some(60), Some(false))
+    );
+    for cmd in [["tag", "bird"], ["title", "観察"]] {
+        let meta = json_meta(&root, &[cmd[0], cmd[1], "--top", "5", "--json"]);
+        assert_eq!(meta["capped"].as_bool(), Some(true), "{cmd:?}");
+        let meta = json_meta(&root, &[cmd[0], cmd[1], "--top", "100", "--json"]);
+        assert_eq!(meta["capped"].as_bool(), Some(false), "{cmd:?}");
+        // --top を付けない時は capped を出さない (今までどおり)
+        let meta = json_meta(&root, &[cmd[0], cmd[1], "--json"]);
+        assert!(meta.get("capped").is_none(), "{cmd:?}");
+    }
+
+    // bm25_limit は --top が無い時の既定
+    fs::write(root.join("mikke.toml"), "[search]\nbm25_limit = 10\n").unwrap();
+    assert_eq!(count(&["find", "見回った"]), 10);
+    assert_eq!(count(&["find", "見回った", "--top", "20"]), 20);
+    assert_eq!(count(&["title", "観察"]), 60);
+
+    let zero = run_raw(&root, &["find", "見回った", "--top", "0"]);
+    assert_eq!(zero.status.code(), Some(2));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// date の無いノートは updated で並び、recent にも出る (#74)。
+#[test]
+fn sort_key_falls_back_to_updated() {
+    let note = |title: &str, field: &str| {
+        format!("---\ntitle: {title}\n{field}\ntags: [nest]\n---\n\n巣箱 見回り の記録。\n")
+    };
+    let a = note("観察メモA", "updated: 2020-01-10");
+    let m = note("観察メモM", "updated: 2024-05-20");
+    let z = note("観察メモZ", "updated: 2026-10-01");
+    let root = temp_repo(
+        "sort-key-updated",
+        &[
+            ("mikke.toml", "[scan]\ninclude = [\"notes\"]\n"),
+            ("notes/a.md", &a),
+            ("notes/m.md", &m),
+            ("notes/z.md", &z),
+        ],
+    );
+    run(&root, &["index"]);
+    let zma = vec!["notes/z.md", "notes/m.md", "notes/a.md"];
+    for args in [
+        &["find", "巣箱"][..],
+        &["title", "観察"],
+        &["tag", "nest"],
+        &["recent"],
+    ] {
+        assert_eq!(hit_paths_in_order(&root, args), zma, "{args:?}");
+    }
+    let out = run_raw(&root, &["recent", "--json"]);
+    let line = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .nth(1)
+        .unwrap()
+        .to_string();
+    let hit: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        (hit["date"].as_str(), hit["updated"].as_str()),
+        (Some(""), Some("2026-10-01"))
+    );
+
+    // date だけの古いノートは、date の日付で並ぶ (date を書いたノートの扱いは変えない)
+    let b = note("観察メモB", "date: 2019-03-01");
+    fs::write(root.join("notes/b.md"), b).unwrap();
+    // date も updated も無いノートは末尾、recent では除外
+    fs::write(
+        root.join("notes/n.md"),
+        "---\ntitle: 観察メモN\ntags: [nest]\n---\n\n巣箱 見回り の記録。\n",
+    )
+    .unwrap();
+    run(&root, &["index"]);
+    assert_eq!(
+        hit_paths_in_order(&root, &["recent"]),
+        vec!["notes/z.md", "notes/m.md", "notes/a.md", "notes/b.md"]
+    );
+    for args in [&["title", "観察"][..], &["tag", "nest"], &["find", "巣箱"]] {
+        assert_eq!(
+            hit_paths_in_order(&root, args),
+            vec![
+                "notes/z.md",
+                "notes/m.md",
+                "notes/a.md",
+                "notes/b.md",
+                "notes/n.md"
+            ],
+            "{args:?}"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// 短語を含む find は簡易スコアで並べてから切る。hybrid の BM25 ストリームも同じ (#75)。
+#[test]
+fn like_fallback_ranks_by_score() {
+    let diary = |m: &str| {
+        format!(
+            "---\ntitle: 観察日誌 2026-{m}\ndate: 2026-{m}-15\nsummary: 月例の観察日誌\n---\n雨のため見回りを短く切り上げた。巣箱の近くで野鳥を 1 羽見た。池のカモは 12 羽。\n"
+        )
+    };
+    let (d1, d2, d3, d4) = (diary("01"), diary("02"), diary("03"), diary("04"));
+    let root = temp_repo(
+        "like-score",
+        &[
+            ("mikke.toml", ""),
+            ("notes/diary-2026-01.md", &d1),
+            ("notes/diary-2026-02.md", &d2),
+            ("notes/diary-2026-03.md", &d3),
+            ("notes/diary-2026-04.md", &d4),
+            (
+                "notes/nestbox-howto.md",
+                "---\ntitle: 野鳥巣箱の掛け方\ndate: 2025-01-10\nsummary: 野鳥巣箱を掛ける時期と場所\n---\n野鳥巣箱は秋のうちに掛ける。巣箱の穴の大きさで、来る野鳥が変わる。\n巣箱は野鳥が出入りしやすい高さに付け、野鳥の天敵が届かない枝を選ぶ。\n春に野鳥が巣を作ったら、巣箱には近づかない。\n",
+            ),
+        ],
+    );
+    run(&root, &["index"]);
+    let howto = "notes/nestbox-howto.md";
+    let ranked = hit_paths_in_order(&root, &["find", "野鳥", "巣箱"]);
+    assert_eq!(
+        ranked,
+        vec![
+            howto,
+            "notes/diary-2026-04.md",
+            "notes/diary-2026-03.md",
+            "notes/diary-2026-02.md",
+            "notes/diary-2026-01.md"
+        ],
+        "本命が 1 位、同点は date 降順"
+    );
+    let (head, _) = run(&root, &["find", "野鳥", "巣箱"]);
+    assert!(
+        head.starts_with(
+            "全文検索 '野鳥 巣箱' の結果 (5件, 簡易スコア順 (短語を含み BM25 算出不可)):"
+        ),
+        "{head}"
+    );
+    let meta = json_meta(&root, &["find", "野鳥", "巣箱", "--json"]);
+    assert_eq!(meta["order"].as_str(), Some("approx"));
+
+    let hybrid = hit_paths_in_order(&root, &["hybrid", "野鳥", "巣箱", "--top", "3"]);
+    assert_eq!(hybrid.first().map(String::as_str), Some(howto));
+    let meta = json_meta(&root, &["hybrid", "野鳥", "巣箱", "--top", "3", "--json"]);
+    assert_eq!(meta["order"].as_str(), Some("approx"));
+    let (head, _) = run(&root, &["hybrid", "野鳥", "巣箱", "--top", "3"]);
+    assert!(head.contains("BM25 は簡易スコア順"), "{head}");
+    let meta = json_meta(&root, &["hybrid", "野鳥巣箱", "--top", "3", "--json"]);
+    assert_eq!(meta["order"].as_str(), Some("relevance"));
+
+    // 並べてから切るので、上限が小さくても本命は落ちない
+    fs::write(root.join("mikke.toml"), "[search]\nbm25_limit = 3\n").unwrap();
+    assert_eq!(
+        hit_paths_in_order(&root, &["find", "野鳥", "巣箱"])
+            .first()
+            .map(String::as_str),
+        Some(howto)
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// manifest.tsv の各コマンド出力を golden と比較。
 #[test]
 fn golden_commands() {
