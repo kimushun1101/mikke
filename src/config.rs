@@ -76,7 +76,7 @@ pub fn find_config_file(dir: &Path) -> Option<PathBuf> {
     if existing.len() > 1 {
         warn_once(format!(
             "{} に mikke.toml と .mikke.toml が両方あります。mikke.toml を使用します。",
-            dir.display()
+            display_path(dir)
         ));
     }
     existing.into_iter().next()
@@ -203,7 +203,7 @@ impl Config {
 }
 
 fn config_error(cfg_path: &Path, msg: &str) -> ! {
-    eprintln!("Error: {}: {msg}", cfg_path.display());
+    eprintln!("Error: {}: {msg}", display_path(cfg_path));
     std::process::exit(2);
 }
 
@@ -428,7 +428,7 @@ fn unknown_key_messages(p: &Path, data: &toml::Value, sections: &[&str]) -> Vec<
                     .or_else(|| near(k, keys.iter().copied()).map(str::to_string));
                 out.push(format!(
                     "{}: 未知のキー [{name}] {k} を無視します{}",
-                    p.display(),
+                    display_path(p),
                     hint(h)
                 ));
             }
@@ -436,14 +436,14 @@ fn unknown_key_messages(p: &Path, data: &toml::Value, sections: &[&str]) -> Vec<
             let h = near(name, KNOWN_KEYS.iter().map(|(s, _)| *s)).map(|s| format!("[{s}]"));
             out.push(format!(
                 "{}: 未知の節 [{name}] を無視します{}",
-                p.display(),
+                display_path(p),
                 hint(h)
             ));
         } else {
             let h = section_having(name, None).map(|s| format!("[{s}] {name}"));
             out.push(format!(
                 "{}: 節の外の未知のキー {name} を無視します{}",
-                p.display(),
+                display_path(p),
                 hint(h)
             ));
         }
@@ -485,12 +485,12 @@ fn warn_name_values(p: &Path, key: &str, what: &str, values: &[String]) {
         if v.contains('/') || (cfg!(windows) && v.contains('\\')) {
             warn_once(format!(
                 "{}: [scan] {key} の \"{v}\" はどの{what}とも一致しません (名前の完全一致で比べます。root 相対のパスで外すには [scan] exclude_paths を使います)",
-                p.display()
+                display_path(p)
             ));
         } else if v.contains('*') || v.contains('?') {
             warn_once(format!(
                 "{}: [scan] {key} の \"{v}\" は glob として扱いません (名前の完全一致で比べます。パターンで外すには [scan] respect_gitignore = true と .gitignore を使います)",
-                p.display()
+                display_path(p)
             ));
         }
     }
@@ -572,7 +572,7 @@ fn load(root: PathBuf, full: bool) -> Config {
             if v.contains('*') || v.contains('?') {
                 warn_once(format!(
                     "{}: [scan] exclude_paths の \"{v}\" は glob として扱いません (root 相対のパスの完全一致で比べます)",
-                    p.display()
+                    display_path(p)
                 ));
             }
         }
@@ -580,7 +580,7 @@ fn load(root: PathBuf, full: bool) -> Config {
             if cfg.root.join(v).is_file() {
                 warn_once(format!(
                     "{}: [scan] include の \"{v}\" はファイルのため走査しません (include にはディレクトリを書きます)",
-                    p.display()
+                    display_path(p)
                 ));
             }
         }
@@ -730,9 +730,67 @@ pub fn to_posix(p: &Path) -> String {
         .join("/")
 }
 
+/// パスを表示用の文字列にする。root は canonicalize 済みで、Windows では `\\?\C:\...` の形になるため、
+/// 表示する時だけ `\\?\` を外す (#67)。内部保持とファイル操作のパスは canonicalize したままにする。
+/// `\\?\C:\...` → `C:\...`、`\\?\UNC\server\share\...` → `\\server\share\...`。
+/// 他の形 (`\\?\GLOBALROOT\...` など) と、外すと MAX_PATH (260) を超える時はそのまま出す
+/// (外した形では開けないため)。Windows 以外は Path::display() と同じ。
+pub fn display_path(p: &Path) -> String {
+    let s = p.display().to_string();
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let stripped = match p.components().next() {
+            Some(Component::Prefix(c)) => match c.kind() {
+                Prefix::VerbatimDisk(_) => s.strip_prefix(r"\\?\").map(str::to_string),
+                Prefix::VerbatimUNC(..) => s.strip_prefix(r"\\?\UNC\").map(|r| format!(r"\\{r}")),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(t) = stripped.filter(|t| t.encode_utf16().count() <= 260) {
+            return t;
+        }
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_path_keeps_plain_paths() {
+        for p in ["notes/a.md", ".mikke/index.db", ""] {
+            assert_eq!(
+                display_path(Path::new(p)),
+                Path::new(p).display().to_string()
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn display_path_strips_verbatim_prefix() {
+        for (p, want) in [
+            (r"\\?\C:\notes\.mikke\index.db", r"C:\notes\.mikke\index.db"),
+            (r"\\?\UNC\server\share\notes", r"\\server\share\notes"),
+            // 他の verbatim の形はそのまま
+            (
+                r"\\?\GLOBALROOT\Device\HarddiskVolume1\x",
+                r"\\?\GLOBALROOT\Device\HarddiskVolume1\x",
+            ),
+            (r"C:\notes\a.md", r"C:\notes\a.md"),
+            (r"\\server\share\notes", r"\\server\share\notes"),
+        ] {
+            assert_eq!(display_path(Path::new(p)), want, "{p}");
+        }
+        // 外すと 260 文字を超える時は外さない
+        let long = format!(r"\\?\C:\{}", "a".repeat(258));
+        assert_eq!(display_path(Path::new(&long)), long);
+        let fit = format!(r"\\?\C:\{}", "a".repeat(257));
+        assert_eq!(display_path(Path::new(&fit)), &fit[4..]);
+    }
 
     /// md 本文から ```toml ブロックの中身を順に抜き出す。
     fn toml_blocks(md: &str) -> Vec<String> {

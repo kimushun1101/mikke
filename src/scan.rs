@@ -2,7 +2,9 @@
 
 #![allow(dead_code)]
 
-use crate::config::{load_scan_config, to_posix, warn_once, Config, CONFIG_FILENAMES};
+use crate::config::{
+    display_path, load_scan_config, to_posix, warn_once, Config, CONFIG_FILENAMES,
+};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::Match;
 use regex::Regex;
@@ -304,7 +306,10 @@ fn build_ignore(dir: &Path, file: &Path) -> Option<Gitignore> {
     let bytes = match std::fs::read(file) {
         Ok(b) => b,
         Err(e) => {
-            warn_once(format!("{}: 読めないため無視します ({e})", file.display()));
+            warn_once(format!(
+                "{}: 読めないため無視します ({e})",
+                display_path(file)
+            ));
             return None;
         }
     };
@@ -314,7 +319,7 @@ fn build_ignore(dir: &Path, file: &Path) -> Option<Gitignore> {
         if let Err(e) = b.add_line(Some(file.to_path_buf()), line) {
             warn_once(format!(
                 "{}: {} 行目を解釈できないため無視します ({e})",
-                file.display(),
+                display_path(file),
                 i + 1
             ));
         }
@@ -325,7 +330,7 @@ fn build_ignore(dir: &Path, file: &Path) -> Option<Gitignore> {
         Err(e) => {
             warn_once(format!(
                 "{}: 一部を解釈できないため無視します ({e})",
-                file.display()
+                display_path(file)
             ));
             None
         }
@@ -391,7 +396,7 @@ fn walk_nested(parent: &Config, root: &Path, top_root: &Path, files: &mut Vec<(P
             if let Some(rest) = v.strip_prefix(&pfx) {
                 warn_once(format!(
                     "{}: [scan] exclude_paths の \"{v}\" はネストしたノート repo ({rel}) の中を指すため効きません ({rel} の設定ファイルの exclude_paths に \"{rest}\" と書きます)",
-                    cfg_path.display()
+                    display_path(cfg_path)
                 ));
             }
         }

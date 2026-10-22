@@ -11,7 +11,7 @@
 //!   順序 = vectors 行と一致。semantic_ranked は metadata の model/query_prefix を優先して
 //!   エンコード (保存済みベクトルとエンコード条件を揃える)。
 
-use crate::config::{to_posix, Config};
+use crate::config::{display_path, to_posix, Config};
 use crate::scan;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
@@ -466,7 +466,7 @@ fn build_embeddings(cfg: &Config, force: bool) {
         exit_err(&format!("metadata.json の保存に失敗: {e}"));
     }
 
-    println!("埋め込みを保存しました: {}", embeddings_file.display());
+    println!("埋め込みを保存しました: {}", display_path(&embeddings_file));
     println!("  ノート数: {}", metadata.note_count);
     println!(
         "  ベクトル次元: {}",

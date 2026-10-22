@@ -16,7 +16,7 @@
 
 #![allow(dead_code)]
 
-use crate::config::{to_posix, Config};
+use crate::config::{display_path, to_posix, Config};
 use crate::normalize::normalize_search_text;
 use crate::scan;
 use rusqlite::{params, Connection, OpenFlags};
@@ -351,28 +351,28 @@ const KEEP_HINT: &str = "  ファイルは変更していません。[index] pat
 fn foreign_msg(path: &Path, reason: &str) -> String {
     format!(
         "Error: [index] path が mikke の index でない既存ファイルを指しています: {} ({reason})\n{KEEP_HINT}",
-        path.display()
+        display_path(path)
     )
 }
 
 fn unreadable_msg(path: &Path, e: &str) -> String {
     format!(
         "Error: index を確かめられません: {}: {e}\n{KEEP_HINT}",
-        path.display()
+        display_path(path)
     )
 }
 
 fn residue_msg(path: &Path) -> String {
     format!(
         "Error: index が壊れています (生成が途中で止まった可能性): {}。mikke index で作り直してください",
-        path.display()
+        display_path(path)
     )
 }
 
 fn broken_msg(path: &Path) -> String {
     format!(
         "Error: index が壊れています (必要なテーブルがありません): {}。mikke index で作り直してください",
-        path.display()
+        display_path(path)
     )
 }
 
@@ -469,7 +469,7 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     let Some(name) = path.file_name() else {
         fail(&format!(
             "Error: [index] path がファイル名を持ちません: {}",
-            path.display()
+            display_path(path)
         ));
     };
     let mut name = name.to_os_string();
@@ -497,13 +497,13 @@ fn acquire_lock(index_path: &Path) -> BuildLock {
         .unwrap_or_else(|e| {
             fail(&format!(
                 "Error: index のロックを取れません: {}: {e}",
-                lock_path.display()
+                display_path(&lock_path)
             ))
         });
     let unsupported = |e: io::Error| {
         eprintln!(
             "Warning: index のロックを使えないため、ロック無しで作り直します: {}: {e}",
-            lock_path.display()
+            display_path(&lock_path)
         );
     };
     let held = match file.try_lock() {
@@ -623,7 +623,7 @@ fn write_index(cfg: &Config, use_stderr: bool, lock: &BuildLock) -> BuildIssues 
         if let Err(e) = remove_if_exists(&p) {
             fail(&format!(
                 "Error: index を作成できません: {}: {e}",
-                p.display()
+                display_path(&p)
             ));
         }
     }
@@ -636,11 +636,11 @@ fn write_index(cfg: &Config, use_stderr: bool, lock: &BuildLock) -> BuildIssues 
     let conn = Connection::open(&tmp).unwrap_or_else(|e| {
         abort_build(
             &tmp,
-            &format!("Error: index を作成できません: {}: {e}", tmp.display()),
+            &format!("Error: index を作成できません: {}: {e}", display_path(&tmp)),
         )
     });
     let commit_err =
-        |e: rusqlite::Error| format!("Error: index を確定できません: {}: {e}", tmp.display());
+        |e: rusqlite::Error| format!("Error: index を確定できません: {}: {e}", display_path(&tmp));
     if let Err(e) = conn.execute_batch("BEGIN") {
         abort_build(&tmp, &commit_err(e));
     }
@@ -757,7 +757,7 @@ fn write_index(cfg: &Config, use_stderr: bool, lock: &BuildLock) -> BuildIssues 
             &tmp,
             &format!(
                 "Error: 古い journal を消せません: {}: {e}",
-                old_journal.display()
+                display_path(&old_journal)
             ),
         );
     }
@@ -765,7 +765,7 @@ fn write_index(cfg: &Config, use_stderr: bool, lock: &BuildLock) -> BuildIssues 
     if let Err(e) = replace_index(&tmp, &index_path) {
         let mut msg = format!(
             "Error: index を差し替えられません: {}: {e}",
-            index_path.display()
+            display_path(&index_path)
         );
         if cfg!(windows) {
             msg.push_str("\n  他のプロセスが index を開いている可能性があります。直前の index はそのまま残っています。少し待ってから実行し直してください。");
@@ -776,7 +776,7 @@ fn write_index(cfg: &Config, use_stderr: bool, lock: &BuildLock) -> BuildIssues 
 
     emit(
         use_stderr,
-        &format!("インデックスを生成しました: {}", index_path.display()),
+        &format!("インデックスを生成しました: {}", display_path(&index_path)),
     );
     emit(use_stderr, &format!("  ノート数: {note_count}"));
     emit(use_stderr, &format!("  タグ数: {}", tag_set.len()));
