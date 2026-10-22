@@ -22,7 +22,7 @@ semantic = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "functions"] }
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 # --json (JSON Lines) 出力用。エスケープの手書きは安定インターフェースには危険なため serde 経由で固定
