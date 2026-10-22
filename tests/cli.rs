@@ -2789,6 +2789,45 @@ fn config_warns_backslash_on_windows() {
     assert!(stderr.contains("一致しません"), "警告が無い:\n{stderr}");
 }
 
+/// Windows では root が `\\?\C:\...` に canonicalize されるが、表示するパスには付けない (#67)。
+#[cfg(windows)]
+#[test]
+fn windows_paths_shown_without_verbatim_prefix() {
+    const PREFIX: &str = r"\\?\";
+    let root = temp_repo(
+        "verbatim-shown",
+        &[("mikke.toml", ""), ("notes/a.md", NOTE_A)],
+    );
+    let (code, stdout, stderr) = index_raw(&root);
+    assert_eq!(code, Some(0), "{stderr}");
+    let shown = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("インデックスを生成しました: "))
+        .unwrap_or_else(|| panic!("生成の行が無い:\n{stdout}"));
+    assert!(!shown.contains(PREFIX), "{shown}");
+    // 外した形のまま開ける
+    assert!(Path::new(shown).is_file(), "{shown}");
+
+    // index 判定エラー ([index] path が mikke の index でない既存ファイル)
+    fs::write(root.join("mikke.toml"), "[index]\npath = \"keep.db\"\n").unwrap();
+    fs::write(root.join("keep.db"), "消えては困る。\n").unwrap();
+    let (code, _, stderr) = index_raw(&root);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(
+        stderr.contains("mikke の index でない") && stderr.contains("keep.db"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(PREFIX), "{stderr}");
+
+    // 設定エラー (include を文字列で書く型エラー)
+    fs::write(root.join("mikke.toml"), "[scan]\ninclude = \"notes\"\n").unwrap();
+    let (code, _, stderr) = index_raw(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("mikke.toml: "), "{stderr}");
+    assert!(!stderr.contains(PREFIX), "{stderr}");
+}
+
 /// issue #56 の再現の木。.git は git コマンドを呼ばずにディレクトリだけ作る。
 fn gitignore_repo(tag: &str, config: &str, with_git: bool) -> PathBuf {
     let root = temp_repo(
