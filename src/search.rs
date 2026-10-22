@@ -3,9 +3,11 @@
 //! FTS 変換 (fts_query): 空白で語分割 → 各語を個別に `"..."` quote (内部 " は "") → AND 連結。
 //! find のクエリは AND 意味論と MATCH/LIKE 経路を保つため正規化しない。
 //! trigram 制約: 各語 3 文字以上なら `ORDER BY rank` (FTS5 BM25)。1 語でも <3 文字を含めば
-//!   LIKE フォールバック (全語 AND で LOWER(content/title) LIKE %term%、date 降順、relevance 無し)。
+//!   LIKE フォールバック (全語 AND で mikke_lower(content/title) LIKE %term%、date 降順、relevance 無し)。
 //! find の見出し: 順序を正直に表示。bm25_limit 到達時は打ち切りを明示。
-//! tag/title: 検索列と keyword を正規化した LOWER(...) LIKE %kw% 部分一致、date 降順。
+//! tag/title: 検索列と keyword を正規化した mikke_lower(...) LIKE %kw% 部分一致、date 降順。
+//! LIKE の小文字化は列・keyword とも Rust の to_lowercase (SQLite の LOWER は ASCII だけ)。
+//! keyword の `\` `%` `_` は ESCAPE '\' で逃がし、ワイルドカードにしない。
 //! recent: date!='' を date 降順 LIMIT。
 //! list-tags: GROUP BY tag ORDER BY COUNT(*) DESC, tag。
 //! hybrid RRF: 各ストリーム top_n*candidate_factor → rank 1 始まり → score += w * 1/(rrf_k+rank)。
@@ -19,6 +21,7 @@
 use crate::config::Config;
 use crate::index;
 use crate::normalize::normalize_search_text;
+use rusqlite::functions::FunctionFlags;
 use rusqlite::{params, params_from_iter, Connection, OpenFlags};
 use std::collections::HashMap;
 
@@ -89,12 +92,39 @@ fn open_index(cfg: &Config) -> Connection {
         cfg.index_path(),
         OpenFlags::default() - OpenFlags::SQLITE_OPEN_CREATE,
     ) {
-        Ok(c) => c,
+        Ok(c) => {
+            register_lower(&c);
+            c
+        }
         Err(e) => {
             eprintln!("Error: index を開けません: {e}");
             std::process::exit(2);
         }
     }
+}
+
+/// LIKE の両辺を同じ規則で小文字にする `mikke_lower(text)` を登録する。
+/// SQLite の LOWER は ASCII しか変えず、keyword 側の to_lowercase と食い違うため。
+fn register_lower(conn: &Connection) {
+    conn.create_scalar_function(
+        "mikke_lower",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| Ok(ctx.get::<Option<String>>(0)?.map(|s| s.to_lowercase())),
+    )
+    .expect("mikke_lower の登録に失敗");
+}
+
+/// LIKE pattern の中で `\` `%` `_` を文字そのものとして扱わせる (SQL 側は ESCAPE '\')。
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// 検索系コマンド用の接続。auto_rebuild 有効なら stale 時に全再構築してから開く。
@@ -226,7 +256,10 @@ fn query_paths(conn: &Connection, sql: &str, param: &str) -> Vec<String> {
 fn like_pattern(keyword: &str) -> String {
     let trimmed = keyword.trim();
     let keyword = if trimmed.is_empty() { keyword } else { trimmed };
-    format!("%{}%", normalize_search_text(keyword).to_lowercase())
+    format!(
+        "%{}%",
+        escape_like(&normalize_search_text(keyword).to_lowercase())
+    )
 }
 
 pub fn cmd_tag(cfg: &Config, keyword: &str, json: bool) -> usize {
@@ -235,7 +268,7 @@ pub fn cmd_tag(cfg: &Config, keyword: &str, json: bool) -> usize {
         &conn,
         "SELECT DISTINCT n.path
          FROM tags t JOIN notes n ON t.path = n.path
-         WHERE LOWER(t.tag_search) LIKE ?1
+         WHERE mikke_lower(t.tag_search) LIKE ?1 ESCAPE '\\'
          ORDER BY n.date DESC",
         &like_pattern(keyword),
     );
@@ -264,7 +297,7 @@ pub fn cmd_title(cfg: &Config, keyword: &str, json: bool) -> usize {
         &conn,
         "SELECT n.path
          FROM notes_fts f JOIN notes n ON f.path = n.path
-         WHERE LOWER(f.title) LIKE ?1
+         WHERE mikke_lower(f.title) LIKE ?1 ESCAPE '\\'
          ORDER BY n.date DESC",
         &like_pattern(keyword),
     );
@@ -318,8 +351,10 @@ fn bm25_ranked_paths(conn: &Connection, keyword: &str, limit: i64) -> Vec<String
         let mut clauses: Vec<&str> = Vec::new();
         let mut like_params: Vec<String> = Vec::new();
         for t in &terms {
-            clauses.push("(LOWER(f.content) LIKE ? OR LOWER(f.title) LIKE ?)");
-            let like = format!("%{}%", t.to_lowercase());
+            clauses.push(
+                "(mikke_lower(f.content) LIKE ? ESCAPE '\\' OR mikke_lower(f.title) LIKE ? ESCAPE '\\')",
+            );
+            let like = format!("%{}%", escape_like(&t.to_lowercase()));
             like_params.push(like.clone());
             like_params.push(like);
         }

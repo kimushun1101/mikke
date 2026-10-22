@@ -255,6 +255,123 @@ fn title_whitespace_keyword_is_not_trimmed_to_empty() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// 検索結果の `path:` 行を並べて返す (0 件なら空)。
+fn hit_paths(root: &Path, args: &[&str]) -> Vec<String> {
+    let out = run_raw(root, args);
+    let mut paths: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("path: ").map(str::to_string))
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// LIKE の経路 (title / tag / 短語の find) でも、ASCII 以外の大文字小文字を同一視する (#69)。
+#[test]
+fn like_matches_non_ascii_case() {
+    let root = temp_repo(
+        "like-non-ascii-case",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            (
+                "notes/umlaut.md",
+                "---\ntitle: Äpfel und Birnen\ndate: 2026-01-10\ntags: [Äpfel]\n---\nÄpfel sind rot.\n",
+            ),
+            (
+                "notes/zen.md",
+                "---\ntitle: ＧＰＳ首輪の記録\ndate: 2026-01-09\ntags: [ＧＰＳ]\n---\nキツネにＧＰＳ首輪を付けた。\n",
+            ),
+            (
+                "notes/ascii.md",
+                "---\ntitle: GPS collar log\ndate: 2026-01-08\ntags: [GPS]\n---\ngps collar on a fox.\n",
+            ),
+        ],
+    );
+    run(&root, &["index"]);
+    let umlaut = vec!["notes/umlaut.md".to_string()];
+    let zen = vec!["notes/zen.md".to_string()];
+    let ascii = vec!["notes/ascii.md".to_string()];
+    for args in [
+        ["title", "Äpfel"],
+        ["title", "äpfel"],
+        ["tag", "Äpfel"],
+        ["tag", "äpfel"],
+        ["find", "Äp"],
+        ["find", "äp"],
+    ] {
+        assert_eq!(hit_paths(&root, &args), umlaut, "{args:?}");
+    }
+    // 全角と半角は同一視しない
+    for args in [
+        ["title", "ＧＰＳ"],
+        ["tag", "ＧＰＳ"],
+        ["find", "ＧＰ"],
+        ["find", "ｇｐ"],
+    ] {
+        assert_eq!(hit_paths(&root, &args), zen, "{args:?}");
+    }
+    for args in [["title", "GPS"], ["tag", "gps"], ["find", "Gp"]] {
+        assert_eq!(hit_paths(&root, &args), ascii, "{args:?}");
+    }
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// LIKE の経路で、キーワードの `%` `_` `\` はワイルドカードでなく文字そのものに当たる (#70)。
+#[test]
+fn like_escapes_wildcards() {
+    let root = temp_repo(
+        "like-escape",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            (
+                "notes/pct.md",
+                "---\ntitle: 100% の観察\ndate: 2026-01-07\ntags: [観察]\n---\n巣箱を 100% 見回った。\n",
+            ),
+            (
+                "notes/thousand.md",
+                "---\ntitle: 1000 羽の観察\ndate: 2026-01-06\ntags: [観察]\n---\nカモが 1000 羽いた。\n",
+            ),
+            (
+                "notes/us.md",
+                "---\ntitle: snake_case の名前\ndate: 2026-01-05\ntags: [a_b]\n---\nヘビの名前。\n",
+            ),
+            (
+                "notes/usx.md",
+                "---\ntitle: snakeXcase の名前\ndate: 2026-01-04\ntags: [aXb]\n---\nヘビの名前。\n",
+            ),
+            (
+                "notes/bs.md",
+                "---\ntitle: a\\b の巣\ndate: 2026-01-03\n---\nカラスの巣。\n",
+            ),
+            (
+                "notes/nobs.md",
+                "---\ntitle: ab の巣\ndate: 2026-01-02\n---\nカラスの巣。\n",
+            ),
+        ],
+    );
+    run(&root, &["index"]);
+    let pct = vec!["notes/pct.md".to_string()];
+    let us = vec!["notes/us.md".to_string()];
+    for args in [["title", "100%"], ["find", "0%"]] {
+        assert_eq!(hit_paths(&root, &args), pct, "{args:?}");
+    }
+    for args in [["title", "snake_case"], ["tag", "a_b"], ["find", "e_"]] {
+        assert_eq!(hit_paths(&root, &args), us, "{args:?}");
+    }
+    assert_eq!(
+        hit_paths(&root, &["title", "a\\b"]),
+        vec!["notes/bs.md".to_string()]
+    );
+    // 記号を含まない語は今までどおり
+    assert_eq!(
+        hit_paths(&root, &["title", "の観察"]),
+        vec!["notes/pct.md".to_string(), "notes/thousand.md".to_string()]
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// manifest.tsv の各コマンド出力を golden と比較。
 #[test]
 fn golden_commands() {
