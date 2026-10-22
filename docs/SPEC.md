@@ -147,9 +147,10 @@ stale 判定は次のいずれか: (a) いずれかの md の mtime が `meta['g
 
 - **FTS 変換 (`fts_query`)**: 空白で語分割し、各語を個別に `"..."` quote して `AND` 連結。入力全体を 1 つの quote で囲むと連続一致要求で 0 件化するため**語ごと quote が必須**。内部の `"` は `""` にエスケープ。
 - **和欧間スペース**: `find` はクエリを正規化せず、空白入りクエリの AND 意味論と語長による MATCH / LIKE 選択を維持する。`title` は正規化済み `notes_fts.title` に対してキーワード全体を同じ規則で正規化して LIKE 検索する。`tag` は `tag_search` とキーワードの両方を正規化して比較し、表示には原文の `tag` を使う。
-- **trigram 制約**: FTS5 trigram は各語 3 文字以上必須。**語ごとに**長さ判定し、1 語でも 3 文字未満を含む場合は LIKE フォールバック(全語 AND、`LOWER(content/title) LIKE %term%`、date 降順、relevance 無し)。全語 3 文字以上なら `ORDER BY rank`(FTS5 の BM25)。
+- **trigram 制約**: FTS5 trigram は各語 3 文字以上必須。**語ごとに**長さ判定し、1 語でも 3 文字未満を含む場合は LIKE フォールバック(全語 AND、`mikke_lower(content/title) LIKE %term%`、date 降順、relevance 無し)。全語 3 文字以上なら `ORDER BY rank`(FTS5 の BM25)。
 - **find の順序表示**: BM25 順か「date 降順(短語で relevance 算出不可)」かを**正直に出す**。`bm25_limit` 到達時は「上位 N 件で打ち切り(全ヒット数不明)」と明示(打ち切りを全件数と誤読させない)。
-- **tag/title**: 正規化したキーワードによる `LOWER(...) LIKE %kw%` 部分一致、date 降順。
+- **tag/title**: 正規化したキーワードによる `mikke_lower(...) LIKE %kw%` 部分一致、date 降順。
+- **LIKE の比べ方**(tag / title / find の LIKE フォールバック): 列とキーワードの両方を Rust の `to_lowercase` で小文字にして比べる(`mikke_lower` は検索の接続に登録する関数。SQLite の `LOWER` は ASCII しか変えないため使わない)。ASCII 以外の大文字小文字(`Ä` と `ä`、全角の `Ｇ` と `ｇ`)も同一視し、MATCH 経路と揃う。全角と半角は同一視しない。キーワードの `%` `_` `\` は `ESCAPE '\'` で逃がし、ワイルドカードでなく文字そのものに当てる。
 - **recent**: `date != ''` を date 降順で LIMIT。
 - **list-tags**: `GROUP BY tag ORDER BY COUNT(*) DESC, tag`。
 - **semantic**: クエリを `query_prefix + query` で encode(normalize)、保存ベクトルとの内積(= 正規化済 cosine)で降順 top_n。**モデル/prefix は保存 metadata を優先**(生成時とエンコード条件を揃える)。
