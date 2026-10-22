@@ -1414,7 +1414,9 @@ fn index_safety_non_index_file_is_not_replaced() {
                 assert_eq!(out.status.code(), Some(2), "{ctx}:\n{stderr}");
                 assert!(!stderr.contains("panicked"), "{ctx}:\n{stderr}");
                 assert!(
-                    stderr.contains(path) && stderr.contains("mikke の index でない"),
+                    // Windows では path の区切りが `\` で出る
+                    stderr.replace('\\', "/").contains(path)
+                        && stderr.contains("mikke の index でない"),
                     "{ctx}:\n{stderr}"
                 );
                 assert_eq!(snapshot(&target), before, "{ctx}: 中身が変わった");
@@ -1510,7 +1512,10 @@ fn index_safety_crashed_foreign_sqlite_is_untouched() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 let ctx = format!("{tag} auto={auto} {args:?}");
                 assert_eq!(out.status.code(), Some(2), "{ctx}:\n{stderr}");
-                assert!(stderr.contains("keep/target.db"), "{ctx}:\n{stderr}");
+                assert!(
+                    stderr.replace('\\', "/").contains("keep/target.db"),
+                    "{ctx}:\n{stderr}"
+                );
                 assert!(
                     stderr.contains("ファイルは変更していません"),
                     "{ctx}:\n{stderr}"
