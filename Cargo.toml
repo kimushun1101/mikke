@@ -2,6 +2,8 @@
 name = "mikke"
 version = "0.3.1"
 edition = "2021"
+# File::lock / File::try_lock が 1.89 で安定化
+rust-version = "1.89"
 description = "Markdown ノート検索 CLI — SQLite FTS5 (trigram, 日本語対応) BM25 + optional ローカル embedding hybrid"
 license = "MIT"
 repository = "https://github.com/kimushun1101/mikke"

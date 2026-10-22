@@ -296,7 +296,7 @@ pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
 
     // index 鮮度は実行時依存 (stdout のみ、issues にも report にも含めない)
     if gen_ts.is_none() {
-        println!("[index鮮度] 生成時刻が index に無い (旧形式)。mikke index で再構築を推奨\n");
+        println!("[index鮮度] index の生成が完了していない (途中で止まった可能性)。mikke index で再構築を推奨\n");
     } else if stale_files > 0 {
         println!("[index鮮度] index 生成後に更新された md が {stale_files}件。mikke index で再構築を推奨\n");
     }

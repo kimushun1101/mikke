@@ -331,6 +331,20 @@ pub fn load_config(root: PathBuf) -> Config {
 
         let index = get_table(p, &data, "index");
         cfg.index_rel = scalar_str(p, &index, "index", "path", cfg.index_rel);
+        // 走査は名前が .md で終わるファイルを拾うため、index がノートとして走査され、既存のノートも上書きされ得る
+        // (大文字小文字を区別しない FS では .MD も既存のノートを指す)
+        if Path::new(&cfg.index_rel)
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().ends_with(".md"))
+        {
+            config_error(
+                p,
+                &format!(
+                    "[index] path に .md で終わる path は指定できません (ノートとして走査され、既存のノートを上書きするおそれがあるため): {}",
+                    cfg.index_rel
+                ),
+            );
+        }
         cfg.embeddings_rel = scalar_str(p, &index, "index", "embeddings_dir", cfg.embeddings_rel);
         cfg.auto_rebuild = scalar_bool(p, &index, "index", "auto_rebuild", cfg.auto_rebuild);
 
