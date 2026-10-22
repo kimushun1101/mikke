@@ -744,6 +744,869 @@ fn old_index_format_rebuilds_before_title_search() {
     let _ = fs::remove_dir_all(&root);
 }
 
+// --- index の作り直しの安全性 (#51 / #52 / #53) ---
+//
+// 名前は index_safety_ で始める (Windows の CI がこれで絞る)。
+
+/// stdout / stderr を pipe にして mikke を起動する (並列実行の検証用)。
+fn spawn(root: &Path, args: &[&str]) -> std::process::Child {
+    Command::new(bin())
+        .arg("--root")
+        .arg(root)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn mikke")
+}
+
+fn index_sql(root: &Path, sql: &str) {
+    let conn = Connection::open(root.join(".mikke/index.sqlite")).unwrap();
+    conn.execute_batch(sql).unwrap();
+}
+
+fn meta_value(path: &Path, key: &str) -> Option<String> {
+    let conn = Connection::open(path).unwrap();
+    conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+        .ok()
+}
+
+/// 同じ語を本文に持つノートを n 件作る。
+fn notes_with(word: &str, n: usize) -> Vec<(String, String)> {
+    (0..n)
+        .map(|i| {
+            (
+                format!("notes/n{i:04}.md"),
+                format!("---\ntitle: note {i}\n---\n\n{word} の観察記録。\n"),
+            )
+        })
+        .collect()
+}
+
+fn repo_with(tag: &str, config: &str, notes: &[(String, String)]) -> PathBuf {
+    let mut files: Vec<(&str, &str)> = vec![("mikke.toml", config)];
+    files.extend(notes.iter().map(|(p, c)| (p.as_str(), c.as_str())));
+    temp_repo(tag, &files)
+}
+
+fn count_lines(text: &str, needle: &str) -> usize {
+    text.lines().filter(|l| l.contains(needle)).count()
+}
+
+/// dir に名前が `.tmp-` を含む entry があるか。
+fn has_tmp(dir: &Path) -> bool {
+    fs::read_dir(dir).is_ok_and(|rd| {
+        rd.flatten()
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+    })
+}
+
+/// auto_rebuild = true の find を並列に流しても panic せず、作り直しは各回 1 本 (#51 A-1)。
+#[test]
+fn index_safety_parallel_auto_rebuild_rebuilds_once() {
+    let root = repo_with(
+        "safety-par-arb",
+        "[index]\nauto_rebuild = true\n",
+        &notes_with("ペンギン", 40),
+    );
+    run(&root, &["index"]);
+    for round in 1..=3 {
+        // 未来の mtime だと作り直した後も stale のまま残るので、generated を戻して stale にする
+        index_sql(&root, "UPDATE meta SET value = '0' WHERE key = 'generated'");
+        let children: Vec<_> = (0..4)
+            .map(|_| spawn(&root, &["find", "ペンギン"]))
+            .collect();
+        let mut all_stderr = String::new();
+        for child in children {
+            let out = child.wait_with_output().unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                out.status.success() && stdout.contains("(40件"),
+                "round {round}: {:?}\n{stdout}\n{stderr}",
+                out.status
+            );
+            assert!(!stderr.contains("panicked"), "round {round}:\n{stderr}");
+            all_stderr.push_str(&stderr);
+        }
+        assert_eq!(
+            count_lines(&all_stderr, "再構築しています"),
+            1,
+            "round {round}: 作り直しの告知が 1 本でない:\n{all_stderr}"
+        );
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// 旧形式 (index_format 無し) から上げた直後の既定設定の並列 find でも、作り直しは 1 本。
+#[test]
+fn index_safety_old_format_parallel_rebuilds_once() {
+    let root = repo_with("safety-par-format", "[scan]\n", &notes_with("キリン", 200));
+    run(&root, &["index"]);
+    index_sql(&root, "DELETE FROM meta WHERE key = 'index_format'");
+    let children: Vec<_> = (0..4).map(|_| spawn(&root, &["find", "キリン"])).collect();
+    let mut all_stderr = String::new();
+    for child in children {
+        let out = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{:?}\n{stderr}", out.status);
+        all_stderr.push_str(&stderr);
+    }
+    assert_eq!(
+        count_lines(&all_stderr, "索引の形式が変わったため"),
+        1,
+        "{all_stderr}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// 作り直しはロックを待つ。読むだけの検索はロックを待たない (#51 A-2)。
+#[test]
+fn index_safety_waits_for_lock() {
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let root = repo_with("safety-lock", "[scan]\n", &notes_with("カワウソ", 3));
+    fs::create_dir_all(root.join(".mikke")).unwrap();
+    let index = root.join(".mikke/index.sqlite");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(".mikke/index.sqlite.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+
+    // 前半: index が無い時の find は、ロックが外れるまで作らずに待つ
+    let mut child = spawn(&root, &["find", "カワウソ"]);
+    let stderr = child.stderr.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            let _ = tx.send(line.unwrap_or_default());
+        }
+    });
+    let mut seen = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !seen.iter().any(|l: &String| l.contains("待っています")) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(line) => seen.push(line),
+            Err(_) => panic!("待つ告知が出ない: {seen:?}"),
+        }
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "ロックを待たずに終わった"
+    );
+    assert!(!index.exists(), "ロックを待つ間に index ができた");
+    lock.unlock().unwrap();
+    let out = child.wait_with_output().unwrap();
+    reader.join().unwrap();
+    seen.extend(rx.try_iter());
+    let all = seen.join("\n");
+    assert!(
+        out.status.success(),
+        "{:?}\n{}\n{all}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(count_lines(&all, "待っています"), 1, "{all}");
+    assert_eq!(count_lines(&all, "インデックスが無いため"), 1, "{all}");
+
+    // 後半: 完成した index がある時、既定の find はロックを取らない
+    lock.lock().unwrap();
+    let mut child = spawn(&root, &["find", "カワウソ"]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("読むだけの find がロックを待った");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    lock.unlock().unwrap();
+    assert!(status.success(), "{status:?}");
+    drop(lock);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// generated の無い index (生成が完了していない) は、既定の find が作り直す。health は作り直さない。
+#[test]
+fn index_safety_incomplete_index_rebuilds_by_default() {
+    let root = repo_with("safety-incomplete", "[scan]\n", &notes_with("ラッコ", 3));
+    let index = root.join(".mikke/index.sqlite");
+    run(&root, &["index"]);
+
+    // (a) generated だけ無い
+    index_sql(&root, "DELETE FROM meta WHERE key = 'generated'");
+    let out = run_raw(&root, &["health"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{:?}\n{stderr}", out.status);
+    assert!(stdout.contains("生成が完了していない"), "{stdout}");
+    assert!(!stdout.contains("旧形式"), "{stdout}");
+    assert!(!stderr.contains("再構築"), "health が作り直した:\n{stderr}");
+    assert!(meta_value(&index, "generated").is_none());
+
+    let out = run_raw(&root, &["find", "ラッコ"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("(3件"),
+        "{stdout}\n{stderr}"
+    );
+    assert!(
+        stderr.contains("前回の index 生成が完了していないため"),
+        "{stderr}"
+    );
+    assert!(!stdout.contains("前回の index 生成"), "{stdout}");
+    assert!(meta_value(&index, "generated").is_some());
+
+    // (b) meta の行が全部無い (v0.3.1 で SCHEMA の後に止まった跡)
+    index_sql(&root, "DELETE FROM meta");
+    let out = run_raw(&root, &["find", "ラッコ"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("(3件"),
+        "{stdout}\n{stderr}"
+    );
+    assert!(
+        stderr.contains("前回の index 生成が完了していないため"),
+        "{stderr}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+const NOTES_ONLY_DDL: &str = "CREATE TABLE notes (path TEXT PRIMARY KEY, title TEXT NOT NULL, date TEXT, updated TEXT, summary TEXT, word_count INTEGER)";
+
+/// 作りかけの index (notes だけの空の DB・0 バイト) は、既定では exit 2 で mikke index を案内する。
+#[test]
+fn index_safety_residue_index_exits_2() {
+    for kind in ["notes-only", "empty"] {
+        let root = repo_with(
+            &format!("safety-residue-{kind}"),
+            "[scan]\n",
+            &notes_with("ビーバー", 3),
+        );
+        let index = root.join(".mikke/index.sqlite");
+        let place = || {
+            fs::create_dir_all(index.parent().unwrap()).unwrap();
+            let _ = fs::remove_file(&index);
+            if kind == "notes-only" {
+                Connection::open(&index)
+                    .unwrap()
+                    .execute_batch(NOTES_ONLY_DDL)
+                    .unwrap();
+            } else {
+                fs::write(&index, b"").unwrap();
+            }
+            fs::read(&index).unwrap()
+        };
+        let before = place();
+        for args in [&["find", "ビーバー"][..], &["tag", "x"], &["health"]] {
+            let out = run_raw(&root, args);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(2), "{kind} {args:?}:\n{stderr}");
+            assert!(stderr.contains("mikke index"), "{kind} {args:?}:\n{stderr}");
+            assert!(!stderr.contains("panicked"), "{kind} {args:?}:\n{stderr}");
+            assert_eq!(fs::read(&index).unwrap(), before, "{kind} {args:?}");
+            assert!(
+                !root.join(".mikke/index.sqlite.lock").exists(),
+                "{kind} {args:?}: lock が作られた"
+            );
+        }
+
+        fs::write(root.join("mikke.toml"), "[index]\nauto_rebuild = true\n").unwrap();
+        let out = run_raw(&root, &["find", "ビーバー"]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && stdout.contains("(3件"),
+            "{kind}: {stdout}\n{stderr}"
+        );
+        assert!(stderr.contains("途中で止まっている"), "{kind}: {stderr}");
+
+        fs::write(root.join("mikke.toml"), "[scan]\n").unwrap();
+        place();
+        let out = run_raw(&root, &["index"]);
+        assert!(
+            out.status.success(),
+            "{kind}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+/// 表の欠けた index: health は exit 2、検索は作り直す。
+#[test]
+fn index_safety_broken_index_rebuilds_on_search() {
+    let root = repo_with("safety-broken", "[scan]\n", &notes_with("アザラシ", 3));
+    run(&root, &["index"]);
+    index_sql(&root, "DROP TABLE tags");
+    let out = run_raw(&root, &["health"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("必要なテーブル"), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+
+    let out = run_raw(&root, &["find", "アザラシ"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("(3件"),
+        "{stdout}\n{stderr}"
+    );
+    assert!(stderr.contains("壊れているため"), "{stderr}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// 走査中の設定エラーで止まった build は、元の index を残す (#51 B-3)。
+#[test]
+fn index_safety_failed_build_keeps_previous_index() {
+    let root = temp_repo(
+        "safety-cfgerr",
+        &[
+            ("mikke.toml", "[scan]\ninclude = [\".\"]\n"),
+            ("notes/alpha.md", "---\ntitle: Alpha\n---\nbanana alpha\n"),
+            ("work/beta.md", "---\ntitle: Beta\n---\nbanana beta\n"),
+            (
+                "work/sub/gamma.md",
+                "---\ntitle: Gamma\n---\nbanana gamma\n",
+            ),
+        ],
+    );
+    let index = root.join(".mikke/index.sqlite");
+    run(&root, &["index"]);
+    let before = fs::read(&index).unwrap();
+    fs::write(root.join("work/sub/.mikke.toml"), "[scan\n").unwrap();
+
+    let out = run_raw(&root, &["index"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read(&index).unwrap(), before, "元の index が変わった");
+    assert!(!root.join(".mikke/index.sqlite-journal").exists());
+
+    let out = run_raw(&root, &["find", "banana"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("(3件"),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// 前回の build が残した一時ファイルは、次の build が消す。
+/// `<name>.tmp-` の後が数字でない利用者のファイルは消さない。
+#[test]
+fn index_safety_leftover_tmp_is_removed() {
+    let root = repo_with("safety-leftover", "[scan]\n", &notes_with("イルカ", 2));
+    let tmp = root.join(".mikke/index.sqlite.tmp-99999");
+    let tmp_journal = root.join(".mikke/index.sqlite.tmp-99999-journal");
+    fs::create_dir_all(root.join(".mikke")).unwrap();
+    fs::write(&tmp, "ごみ").unwrap();
+    fs::write(&tmp_journal, "ごみ").unwrap();
+    let keep: Vec<PathBuf> = [
+        "index.sqlite.tmp-backup",
+        "index.sqlite.tmp-2026-10-01.bak",
+        "index.sqlite.tmp-mine.txt",
+        "index.sqlite.tmp-",
+        "index.sqlite.tmp--journal",
+        "index.sqlite.tmp-12x",
+    ]
+    .iter()
+    .map(|n| root.join(".mikke").join(n))
+    .collect();
+    for p in &keep {
+        fs::write(p, "keep").unwrap();
+    }
+
+    let out = run_raw(&root, &["index"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !tmp.exists() && !tmp_journal.exists(),
+        "一時ファイルが残った"
+    );
+    for p in &keep {
+        assert_eq!(
+            fs::read_to_string(p).ok().as_deref(),
+            Some("keep"),
+            "{} が消えた",
+            p.display()
+        );
+    }
+    let out = run_raw(&root, &["find", "イルカ"]);
+    assert!(out.status.success());
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// 読み手が index を開いている間の作り直し。Unix では差し替えが成功し、読み手は旧い index を読み続ける。
+/// Windows では差し替えられず、直前の index を残して exit 2 になる。
+#[test]
+fn index_safety_reader_open_during_rebuild() {
+    let root = repo_with("safety-reader", "[scan]\n", &notes_with("トナカイ", 3));
+    let index = root.join(".mikke/index.sqlite");
+    run(&root, &["index"]);
+    fs::write(
+        root.join("notes/new.md"),
+        "---\ntitle: new\n---\n\nヘラジカ の観察記録。\n",
+    )
+    .unwrap();
+
+    let reader = Connection::open(&index).unwrap();
+    let count = |c: &Connection| -> i64 {
+        c.query_row("SELECT count(*) FROM notes", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(count(&reader), 3);
+    #[cfg(windows)]
+    let before = fs::read(&index).unwrap();
+
+    let out = run_raw(&root, &["index"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    #[cfg(unix)]
+    {
+        assert!(out.status.success(), "{stderr}");
+        assert_eq!(count(&reader), 3, "読み手が旧い index を読めない");
+        drop(reader);
+        let out = run_raw(&root, &["find", "ヘラジカ"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    #[cfg(windows)]
+    {
+        assert_eq!(out.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains("差し替えられません"), "{stderr}");
+        assert!(stderr.contains("差し替えを待っています"), "{stderr}");
+        assert_eq!(fs::read(&index).unwrap(), before);
+        assert!(!has_tmp(&root.join(".mikke")), "一時ファイルが残った");
+        drop(reader);
+        let out = run_raw(&root, &["index"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// build を kill しても、最終 path に作りかけの index は出ない (#51 B-1 / B-2、best-effort)。
+#[cfg(unix)]
+#[test]
+fn index_safety_killed_build_never_exposes_partial_index() {
+    use std::os::unix::fs::MetadataExt;
+    use std::time::{Duration, Instant};
+
+    let n = 1500;
+    let root = repo_with(
+        "safety-kill",
+        "[search]\nbm25_limit = 5000\n",
+        &notes_with("ペリカン", n),
+    );
+    let dir = root.join(".mikke");
+    let index = dir.join("index.sqlite");
+    run(&root, &["index"]);
+    let ino = fs::metadata(&index).unwrap().ino();
+
+    // 書き始めの合図は実装に依らないものにする: 一時ファイルか journal ができた、
+    // または最終 path の index が消えた・置き換わった
+    let started = || {
+        has_tmp(&dir)
+            || dir.join("index.sqlite-journal").exists()
+            || fs::metadata(&index).map_or(true, |m| m.ino() != ino)
+    };
+    // 書き始めてすぐと、少し書き進めた後の 2 回止める
+    for delay in [0, 50] {
+        let mut child = spawn(&root, &["index"]);
+        let tmp = dir.join(format!("index.sqlite.tmp-{}", child.id()));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if child.try_wait().unwrap().is_some() || Instant::now() > deadline {
+                break; // 間に合わず build が終わってもよい
+            }
+            if started() {
+                std::thread::sleep(Duration::from_millis(delay));
+                let _ = child.kill();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let _ = child.wait();
+
+        // 検索の自動 build で隠れないよう、最終 path の index を先に直接読む
+        assert!(index.exists(), "最終 path の index が消えた");
+        let conn = Connection::open(&index).unwrap();
+        let notes: i64 = conn
+            .query_row("SELECT count(*) FROM notes", [], |r| r.get(0))
+            .unwrap_or(-1);
+        drop(conn);
+        assert_eq!(notes, n as i64, "最終 path に作りかけの index が出た");
+        assert!(meta_value(&index, "generated").is_some());
+
+        // 一時ファイルも 1 transaction なので、途中までの行は確定していない (#52)。
+        // 読み書きで開くと hot journal が巻き戻る。止める前に終わって無い回は見ない
+        if tmp.exists() {
+            let conn = Connection::open(&tmp).unwrap();
+            let rows: i64 = conn
+                .query_row("SELECT count(*) FROM notes", [], |r| r.get(0))
+                .unwrap_or(0);
+            drop(conn);
+            assert_eq!(
+                rows, 0,
+                "delay={delay}: 一時ファイルに途中までの行が確定した"
+            );
+        }
+    }
+
+    let out = run_raw(&root, &["find", "ペリカン", "--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains(&format!("\"count\":{n},")),
+        "{}\n{}",
+        stdout.lines().next().unwrap_or_default(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(meta_value(&index, "generated").is_some());
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// [index] path が .md で終わる時は、ファイルの有無・大文字小文字によらず設定エラー (#53)。
+#[test]
+fn index_safety_md_index_path_is_rejected() {
+    for (tag, path) in [
+        ("existing", "notes/important.md"),
+        ("missing", "top.md"),
+        ("upper", "x/IDX.MD"),
+    ] {
+        let root = temp_repo(
+            &format!("safety-md-{tag}"),
+            &[
+                ("mikke.toml", ""),
+                (
+                    "notes/important.md",
+                    "---\ntitle: 大事なメモ\n---\nペンギンの観察記録。消えては困る。\n",
+                ),
+                (
+                    "notes/other.md",
+                    "---\ntitle: 別のメモ\n---\nキリンの観察記録。\n",
+                ),
+            ],
+        );
+        let important = root.join("notes/important.md");
+        let before = fs::read(&important).unwrap();
+        for (auto, args) in [
+            (false, &["index"][..]),
+            (false, &["find", "キリン"]),
+            (true, &["find", "キリン"]),
+            (false, &["health"]),
+        ] {
+            let mut config = format!("[index]\npath = \"{path}\"\n");
+            if auto {
+                config.push_str("auto_rebuild = true\n");
+            }
+            fs::write(root.join("mikke.toml"), config).unwrap();
+            let out = run_raw(&root, args);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(2), "{path} {args:?}:\n{stderr}");
+            assert!(
+                stderr.contains("[index] path") && stderr.contains(path),
+                "{path} {args:?}:\n{stderr}"
+            );
+            assert_eq!(fs::read(&important).unwrap(), before, "{path} {args:?}");
+            assert!(!root.join("top.md").exists(), "{path} {args:?}");
+            assert!(!root.join("x").exists(), "{path} {args:?}");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+/// [index] path が mikke の index でない既存ファイルを指す時は、どの経路でも消さずに exit 2 (#53)。
+#[test]
+fn index_safety_non_index_file_is_not_replaced() {
+    // (tag, [index] path, 用意する中身。None はそのまま使う)
+    let cases: [(&str, &str, Option<&str>); 6] = [
+        ("text", "keep/target.db", Some("text")),
+        ("other", "keep/target.db", Some("CREATE TABLE other (x TEXT);")),
+        (
+            "meta-only",
+            "keep/target.db",
+            Some("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); INSERT INTO meta VALUES ('generated', '1.0');"),
+        ),
+        (
+            "meta-other",
+            "keep/target.db",
+            Some("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE other (x TEXT);"),
+        ),
+        ("config", "mikke.toml", None),
+        ("dir", "keep", None),
+    ];
+    for (tag, path, content) in cases {
+        let root = temp_repo(
+            &format!("safety-foreign-{tag}"),
+            &[
+                ("mikke.toml", ""),
+                ("keep/readme.txt", "フォルダの中身\n"),
+                (
+                    "notes/other.md",
+                    "---\ntitle: 別のメモ\n---\nキリンの観察記録。\n",
+                ),
+            ],
+        );
+        let target = root.join(path);
+        match content {
+            Some("text") => fs::write(&target, "消えては困る。\n").unwrap(),
+            Some(sql) => Connection::open(&target)
+                .unwrap()
+                .execute_batch(sql)
+                .unwrap(),
+            None => {}
+        }
+        let parent = target.parent().unwrap().to_path_buf();
+        let lock = parent.join(format!(
+            "{}.lock",
+            target.file_name().unwrap().to_string_lossy()
+        ));
+        for auto in [false, true] {
+            let mut config = format!("[index]\npath = \"{path}\"\n");
+            if auto {
+                config.push_str("auto_rebuild = true\n");
+            }
+            fs::write(root.join("mikke.toml"), config).unwrap();
+            let snapshot = |p: &Path| -> Vec<u8> {
+                if p.is_dir() {
+                    fs::read(p.join("readme.txt")).unwrap()
+                } else {
+                    fs::read(p).unwrap()
+                }
+            };
+            let before = snapshot(&target);
+            let commands: Vec<&[&str]> = if auto {
+                vec![&["find", "キリン"]]
+            } else {
+                vec![&["index"], &["find", "キリン"], &["health"]]
+            };
+            for args in commands {
+                let out = run_raw(&root, args);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let ctx = format!("{tag} auto={auto} {args:?}");
+                assert_eq!(out.status.code(), Some(2), "{ctx}:\n{stderr}");
+                assert!(!stderr.contains("panicked"), "{ctx}:\n{stderr}");
+                assert!(
+                    stderr.contains(path) && stderr.contains("mikke の index でない"),
+                    "{ctx}:\n{stderr}"
+                );
+                assert_eq!(snapshot(&target), before, "{ctx}: 中身が変わった");
+                assert!(!lock.exists(), "{ctx}: lock が作られた");
+                assert!(!has_tmp(&parent), "{ctx}: 一時ファイルが作られた");
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+/// SQLite のファイルと付随ファイルを、書き手が落ちた時の形で dst へ写す。
+/// 書き手の接続は開いたまま写すので、写した側には誰も lock を持たない。
+fn crashed_sqlite(src: &Path, dst: &Path, setup: &str, pending: &str, sidecar: &str) {
+    let conn = Connection::open(src).unwrap();
+    conn.execute_batch(setup).unwrap();
+    conn.execute_batch(pending).unwrap();
+    fs::create_dir_all(dst.parent().unwrap()).unwrap();
+    fs::copy(src, dst).unwrap();
+    let side = |p: &Path| PathBuf::from(format!("{}{sidecar}", p.display()));
+    fs::copy(side(src), side(dst)).unwrap();
+    assert!(fs::metadata(side(dst)).unwrap().len() > 0, "{sidecar} が空");
+    drop(conn);
+}
+
+/// dir の中の名前とバイト列。
+fn dir_bytes(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut v: Vec<_> = fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                fs::read(e.path()).unwrap(),
+            )
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// 書きかけの WAL や hot journal を持つ索引でない SQLite を、判定のために書き換えない (#53)。
+#[test]
+fn index_safety_crashed_foreign_sqlite_is_untouched() {
+    let fill = "CREATE TABLE other (x TEXT); WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 2000) INSERT INTO other SELECT printf('%0200d', i) FROM c;";
+    let cases = [
+        (
+            "wal",
+            "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;",
+            fill,
+            "-wal",
+        ),
+        (
+            "hot",
+            fill,
+            "PRAGMA cache_size = 2; BEGIN; UPDATE other SET x = 'b';",
+            "-journal",
+        ),
+    ];
+    for (tag, setup, pending, sidecar) in cases {
+        let root = temp_repo(
+            &format!("safety-crashed-{tag}"),
+            &[
+                ("mikke.toml", ""),
+                (
+                    "notes/other.md",
+                    "---\ntitle: 別のメモ\n---\nキリンの観察記録。\n",
+                ),
+            ],
+        );
+        let keep = root.join("keep");
+        crashed_sqlite(
+            &root.join("src.db"),
+            &keep.join("target.db"),
+            setup,
+            pending,
+            sidecar,
+        );
+        let before = dir_bytes(&keep);
+        for auto in [false, true] {
+            let mut config = "[index]\npath = \"keep/target.db\"\n".to_string();
+            if auto {
+                config.push_str("auto_rebuild = true\n");
+            }
+            fs::write(root.join("mikke.toml"), config).unwrap();
+            let commands: Vec<&[&str]> = if auto {
+                vec![&["find", "キリン"]]
+            } else {
+                vec![&["index"], &["find", "キリン"], &["health"]]
+            };
+            for args in commands {
+                let out = run_raw(&root, args);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let ctx = format!("{tag} auto={auto} {args:?}");
+                assert_eq!(out.status.code(), Some(2), "{ctx}:\n{stderr}");
+                assert!(stderr.contains("keep/target.db"), "{ctx}:\n{stderr}");
+                assert!(
+                    stderr.contains("ファイルは変更していません"),
+                    "{ctx}:\n{stderr}"
+                );
+                assert!(dir_bytes(&keep) == before, "{ctx}: ファイルが変わった");
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+/// 旧版が最終 path に残した hot journal は、mikke の index なら巻き戻して読む。
+#[test]
+fn index_safety_old_hot_journal_on_index_is_rolled_back() {
+    let root = repo_with(
+        "safety-old-hot",
+        "[search]\nbm25_limit = 5000\n",
+        &notes_with("ペリカン", 300),
+    );
+    run(&root, &["index"]);
+    let index = root.join(".mikke/index.sqlite");
+    let built = root.join("built.sqlite");
+    fs::rename(&index, &built).unwrap();
+    crashed_sqlite(
+        &built,
+        &index,
+        "",
+        "PRAGMA cache_size = 2; BEGIN; DELETE FROM notes; DELETE FROM notes_fts;",
+        "-journal",
+    );
+    let out = run_raw(&root, &["find", "ペリカン", "--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("\"count\":300,"),
+        "{}\n{}",
+        stdout.lines().next().unwrap_or_default(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!root.join(".mikke/index.sqlite-journal").exists());
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// root の外の絶対パス: 既存のファイルは守り、まだ無いファイルには作る (#53)。
+#[test]
+fn index_safety_outside_root() {
+    let root = temp_repo(
+        "safety-outside",
+        &[
+            ("mikke.toml", ""),
+            (
+                "notes/other.md",
+                "---\ntitle: 別のメモ\n---\nキリンの観察記録。\n",
+            ),
+        ],
+    );
+    let outside = temp_repo(
+        "safety-outside-ext",
+        &[("precious.txt", "消えては困る。\n")],
+    );
+    let precious = outside.join("precious.txt");
+    let before = fs::read(&precious).unwrap();
+    // TOML の literal string にして、Windows の \ をそのまま渡す
+    let config = |p: &Path, auto: bool| {
+        let mut c = format!("[index]\npath = '{}'\n", p.display());
+        if auto {
+            c.push_str("auto_rebuild = true\n");
+        }
+        c
+    };
+    for (auto, args) in [(false, &["index"][..]), (true, &["find", "キリン"])] {
+        fs::write(root.join("mikke.toml"), config(&precious, auto)).unwrap();
+        let out = run_raw(&root, args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}:\n{stderr}");
+        assert_eq!(fs::read(&precious).unwrap(), before, "{args:?}");
+    }
+
+    let fresh = outside.join("sub/fresh.sqlite");
+    fs::write(root.join("mikke.toml"), config(&fresh, false)).unwrap();
+    let out = run_raw(&root, &["index"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(fs::read(&fresh).unwrap().starts_with(b"SQLite format 3\0"));
+    let out = run_raw(&root, &["find", "キリン"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&outside);
+}
+
 // --- version (slim/full 判別) ---
 
 /// --version は subcommand 探索より前に判定され、slim ビルドでは従来通りの表記のまま。

@@ -19,7 +19,7 @@
 use crate::config::Config;
 use crate::index;
 use crate::normalize::normalize_search_text;
-use rusqlite::{params, params_from_iter, Connection};
+use rusqlite::{params, params_from_iter, Connection, OpenFlags};
 use std::collections::HashMap;
 
 /// 検索結果 1 件。--json ではこのまま 1 行の JSON へ serialize する (field 順 = キー順)。
@@ -84,7 +84,11 @@ fn print_json<T: serde::Serialize>(value: &T) {
 }
 
 fn open_index(cfg: &Config) -> Connection {
-    match Connection::open(cfg.index_path()) {
+    // CREATE を付けない: 消えた index を 0 バイトで作り、最初のクエリで panic するのを防ぐ
+    match Connection::open_with_flags(
+        cfg.index_path(),
+        OpenFlags::default() - OpenFlags::SQLITE_OPEN_CREATE,
+    ) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: index を開けません: {e}");

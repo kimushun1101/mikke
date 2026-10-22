@@ -33,6 +33,17 @@ jobs:
       - name: build (semantic, musl)
         run: cargo build --locked --features semantic --target x86_64-unknown-linux-musl
 
+  # index の差し替え (#51) は Windows だけ経路が違う (開いている index を rename できずリトライする)。
+  # その経路を固定するテストは名前が index_safety_ で始まる (unit と tests/cli.rs の両方)
+  index-safety-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: test (index_safety_)
+        run: cargo test --locked index_safety_
+
   install-script:
     runs-on: ubuntu-latest
     steps:

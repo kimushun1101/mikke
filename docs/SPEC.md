@@ -31,7 +31,7 @@ grep の慣習に合わせる。呼び出し側は出力文言でなく exit cod
 |---|---|
 | 検索系(find / tag / title / semantic / hybrid)で 1 件以上ヒット。links / backlinks で結果 1 件以上。その他コマンドの正常終了 | 0 |
 | 検索系で 0 件。links / backlinks で結果 0 件 | 1 |
-| エラー(設定の型不一致・ルート未特定・index open 失敗・semantic 無効ビルド/無効 repo での semantic / embed 等) | 2 |
+| エラー(設定の型不一致・ルート未特定・index open 失敗・`[index] path` が mikke の index でない既存ファイルや `.md` で終わる名前を指す・作りかけや壊れた index を既定の検索や health で開いた・index を差し替えられない(Windows で他のプロセスが開いている)・semantic 無効ビルド/無効 repo での semantic / embed 等) | 2 |
 
 - links / backlinks の「結果」は検索系のヒットに準ずる: links は対象 target 数(解決可否を問わず — 未解決の列挙も結果)、backlinks は被リンク元ノート数。`<note>` 引数が解決できない場合(該当なし・複数一致)は結果 0 件でなく入力エラーの 2(「リンクグラフ」参照)
 - 一覧系(list-tags / recent)は「0 件も正常な状態報告」なので 0 のまま(recent は index 生存確認にも使う)
@@ -54,7 +54,7 @@ exclude_dirs = []            # 指定でデフォルト置換。既定: .obsidia
 exclude_files = ["README.md", "CLAUDE.md", "AGENTS.md", "GEMINI.md"]
 
 [index]
-path = ".mikke/index.sqlite"           # gitignore すること
+path = ".mikke/index.sqlite"           # gitignore すること (同じフォルダに <path>.lock と、作り直し中の <path>.tmp-<pid> もできる)
 embeddings_dir = ".mikke/embeddings"
 auto_rebuild = false                   # true で検索時にソース更新を検知したら自動で全再構築
 
@@ -81,6 +81,7 @@ disable = []                           # 項目単位で無効化するチェッ
 
 **設定読み込みの厳格さ**: 型不一致は silent に誤動作させず即エラー終了する。特に「文字列配列指定に文字列を渡すと 1 文字ずつに分解される」事故を型検査で弾く。`bool` は整数指定に紛れ込ませない。BOM 付き TOML (utf-8-sig) を許容。
 **常に除外**: 設定に関わらず `.git` と `.mikke` は走査対象外(`exclude_dirs` をデフォルト置換しても、ネスト repo の設定でも生きる)。index/embeddings の出力先は「そのパス配下」を**root 相対 prefix 一致**で除外する(ディレクトリ名一致だと同名ディレクトリが任意の深さで全消えする事故になるため)。**ディレクトリ symlink は辿らない**(ループ防止。ファイル symlink の `.md` は対象)。
+**`[index] path` の検査**: `.md` で終わる path は、大文字小文字を区別せず、ファイルの有無によらず設定エラーにする(走査は名前が `.md` で終わるファイルを拾うので、index がノートとして走査され、既存のノートを上書きするおそれがあるため)。既存のファイルは、mikke の index か作りかけの index と確かめられた時だけ作り直す。それ以外は消さずに exit 2 にし、path と理由を出す(判定は「index スキーマ」の自動再構築を参照)。root の外の絶対パスも使える(同じ検査で守る)。
 
 ## ネストしたノート repo
 
@@ -114,9 +115,23 @@ meta(key PRIMARY KEY, value)     -- meta['generated'] に index 生成時刻 (he
                                  -- (auto_rebuild の stale 判定に使用)、meta['index_format'] に索引形式
 ```
 
-index が無い場合は検索時に自動 build(clone 直後フォールバック)。`mikke index` は drop→再作成の全再構築。`notes` / `tags.tag` / `links` と `summary` / `word_count` は原文由来の値を保ち、`notes_fts.title` / `notes_fts.content` / `tags.tag_search` は検索用に和欧間スペースを正規化する。正規化は U+0020 1 個の両隣が非 whitespace かつ少なくとも片側が和文クラスの場合にその空白を削除する(和文クラスは U+3001–U+303F、U+3040–U+30FF、U+31F0–U+31FF、U+3400–U+4DBF、U+4E00–U+9FFF、U+F900–U+FAFF、U+FF00–U+FFEF)。全角スペース・連続空白・行頭行末・タブ・NBSP は保存し、正規化は冪等。`meta['generated']` は epoch 秒の小数文字列(秒精度だと mtime との比較で秒未満の更新を取りこぼすため)。index フォーマットは内部表現であり互換保証しない(`.mikke/` は常に再生成可能)。
+index が無い場合は検索時に自動 build(clone 直後フォールバック)。`mikke index` は全再構築で、次の手順で作り直す: `<path>.lock` を排他ロックする(作り直しは 1 本ずつ。待つ間は stderr に告知する) → 同じフォルダの `<path>.tmp-<pid>` に 1 つの transaction で書く → 閉じる → rename で差し替える。最中の検索は直前の index を読む。中断・panic・走査中の設定エラーの後は、直前の index が残る(初回は無いまま)。残った一時ファイル(`<path>.tmp-<数字>` とその `-journal`)は、次の作り直しで消す。この形でないファイルは消さない。ロック非対応の FS では、Warning を出してロック無しで作る。Windows で差し替えられない時は約 10 秒リトライし、だめなら直前の index を残して exit 2 にする。`notes` / `tags.tag` / `links` と `summary` / `word_count` は原文由来の値を保ち、`notes_fts.title` / `notes_fts.content` / `tags.tag_search` は検索用に和欧間スペースを正規化する。正規化は U+0020 1 個の両隣が非 whitespace かつ少なくとも片側が和文クラスの場合にその空白を削除する(和文クラスは U+3001–U+303F、U+3040–U+30FF、U+31F0–U+31FF、U+3400–U+4DBF、U+4E00–U+9FFF、U+F900–U+FAFF、U+FF00–U+FFEF)。全角スペース・連続空白・行頭行末・タブ・NBSP は保存し、正規化は冪等。`meta['generated']` は epoch 秒の小数文字列(秒精度だと mtime との比較で秒未満の更新を取りこぼすため)。index フォーマットは内部表現であり互換保証しない(`.mikke/` は常に再生成可能)。
 
-**自動再構築**: 検索系コマンド(find / tag / title / semantic / hybrid / list-tags / recent / links / backlinks)の index 準備経路では、`auto_rebuild` の設定に関わらず毎回 `meta['index_format']` の 1 行だけを確認する。値の不一致、または meta テーブルはあるが行が無い旧形式なら stderr へ告知して全再構築する。meta テーブルが無い・SQLite として読めないファイルは mikke の index と見なさず再構築しない(`[index] path` が既存の別ファイルを指していても消さないため)。index を開けない場合も含め、`auto_rebuild` の鮮度判定か後段の接続エラーに任せる。形式一致後、`[index] auto_rebuild = true` (既定 false)なら鮮度を判定し、stale なら stderr へ告知して全再構築する(stdout の出力フォーマットは変えない)。`health` はこれらの判定を通らない(再構築すると index 鮮度診断がマスクされるため。index 不存在時の自動 build は従来どおり)。stale 判定は次のいずれか: (a) いずれかの md の mtime が `meta['generated']` より新しい、(b) 走査 path 集合の SHA-256 が `meta['scanned_paths_sha256']` と不一致(mtime が保存される移動・リネームや追加・削除も検知)、(c) generated または path 集合の meta キーが無い旧形式 index。走査 md 件数と notes 行数の比較は行わない(frontmatter 破損で index から除外されるファイルがあると恒常 stale 化するため、スナップショットは破損分も含む走査 path 全体で取る)。対象は BM25 index のみで embeddings は対象外(semantic 側の鮮度は `mikke embed` の差分更新に委ねる)。限界と副作用: mtime を保存する copy(rsync -t 等)による内容変更は検知できない。有効時は検索のたびに全 md 走査 + metadata 取得のコストがかかり、ネスト repo の設定が壊れている場合は検索コマンド自体が path 付きで即エラー終了するようになる(fail-loud 方針と整合)。
+**index の判定**: `[index] path` のファイルを、無い / mikke の index / 作りかけ / それ以外(mikke の index でない・読めない)に分ける。mikke の index は、SQLite で、表の名前がすべて mikke のもの、notes の列が一致、meta テーブルがあるもの。作りかけは、0 バイト、表が無い、mikke の表だけで meta テーブルが無いもの。毎回の確認は、短命の接続で sqlite_master・notes の列・meta の 3 行(`index_format` / `generated` / `scanned_paths_sha256`)を読むだけで、md の走査はしない(既定経路の即起動を保つ)。判定は読み取り専用で開き、ファイルと付随ファイルを書き換えない。WAL モードの SQLite は開かずに mikke の index でないとする(mikke は WAL を使わない。開くと SQLite が `-wal` を書き戻して消すため)。巻き戻しの要る journal が残っている時は、journal を無視して形だけ見て、mikke の index か作りかけの時だけ巻き戻す(旧版は最終 path に直接書いていたため)。
+
+**自動再構築**: 検索系コマンド(find / tag / title / semantic / hybrid / list-tags / recent / links / backlinks)の index 準備経路では、`auto_rebuild` の設定に関わらず毎回 index を判定し、上から順に当てはめる(告知は stderr。stdout の出力フォーマットは変えない):
+
+1. 無い → 作る(「インデックスが無いため生成しています...」)
+2. mikke の index でない・読めない → 消さずに exit 2(path と理由を出す)。`auto_rebuild` によらない
+3. 作りかけ → `auto_rebuild = true` なら作り直す(「index の生成が途中で止まっているため再構築しています...」)。既定では exit 2 で `mikke index` を案内する
+4. 検索と health が読む表(notes / tags / links / notes_fts / meta)が欠けている → 作り直す(「index が壊れているため再構築しています...」)
+5. `meta['generated']` が無い → 作り直す(「前回の index 生成が完了していないため再構築しています...」)。設定によらない
+6. `meta['index_format']` が無い・値が違う → 作り直す(「索引の形式が変わったため index を再構築しています...」)。設定によらない
+7. `[index] auto_rebuild = true` (既定 false)で stale → 作り直す(「ソースの更新を検知したため index を再構築しています...」)
+
+`health` は、無ければ作り、作りかけ・表の欠けた・mikke の index でない・読めない index は exit 2 にする。形式違いと generated 無しは作り直さず、鮮度判定も通らない(再構築すると index 鮮度診断がマスクされるため)。`mikke index` は、mikke の index でない・読めないファイルは exit 2 にし、それ以外(作りかけを含む)は告知なしで作り直す。作り直す前にロックを取って判定し直すので、並行した検索でも作り直しは 1 回で、告知も 1 本になる。
+
+stale 判定は次のいずれか: (a) いずれかの md の mtime が `meta['generated']` より新しい、(b) 走査 path 集合の SHA-256 が `meta['scanned_paths_sha256']` と不一致(mtime が保存される移動・リネームや追加・削除も検知)、(c) path 集合の meta キーが無い index。走査 md 件数と notes 行数の比較は行わない(frontmatter 破損で index から除外されるファイルがあると恒常 stale 化するため、スナップショットは破損分も含む走査 path 全体で取る)。対象は BM25 index のみで embeddings は対象外(semantic 側の鮮度は `mikke embed` の差分更新に委ねる)。限界と副作用: mtime を保存する copy(rsync -t 等)による内容変更は検知できない。有効時は検索のたびに全 md 走査 + metadata 取得のコストがかかり、ネスト repo の設定が壊れている場合は検索コマンド自体が path 付きで即エラー終了するようになる(fail-loud 方針と整合)。
 
 ## 検索セマンティクス
 
@@ -198,7 +213,7 @@ score/via は semantic/hybrid のみ。**summary 欠落を空白で黙らせな�
 - **実行bit欠落**: `exec_bit_prefixes` 配下の tracked `*.sh` の git index mode が `100755` でないものを検出。`git -C root -c core.quotepath=off ls-files -s -- <prefixes>` を UTF-8 で読む(後述の encoding 注意)。index(tree) 依存でホスト非依存 → レポートに含めて commit 経由通知に乗せる。
 - **品質チェック**: tags の YAML null / 空文字列要素は filesystem から検出し、タグなし / 要約なし / `word_count < min_words` / updated 未設定は index ベースで検出する。各々 `quality_skip_prefixes` を適用。filesystem 検出の tags 空要素は frontmatter 破損スキャンと同じ走査に乗るため `scan_skip_prefixes` も併せて効く (index build の警告と `index --check` の非 0 終了はどちらの prefix にも影響されない)。
 - **チェックの無効化(`disable`)**: `[health] disable` に挙げたチェック名を項目単位でスキップする(既定は空 = 全チェック有効)。許容名は `frontmatter` / `tags` / `summary` / `low_words` / `updated` の 5 種(完全一致・大文字小文字を区別)。未知名は「設定読み込みの厳格さ」に従い即エラー終了する(typo を silent no-op にしない)。効くのは health コマンドのみで、`mikke index --check` の非 0 終了や index build 時の警告は変わらない(CI 併用時の混乱防止)。実行bit欠落は `exec_bit_prefixes` による opt-in、index 鮮度は情報表示のため対象外。
-- **index 鮮度**: `meta['generated']` より mtime が新しい md の件数。実行時依存なので **stdout のみ**、md レポートには含めない(レポートの差分 = 実質的状態変化、にするため)。`auto_rebuild` 有効でも health は再構築しない(「index スキーマ」参照)。
+- **index 鮮度**: `meta['generated']` より mtime が新しい md の件数。`meta['generated']` が無い時は、生成が完了していない(途中で止まった可能性)と出す。実行時依存なので **stdout のみ**、md レポートには含めない(レポートの差分 = 実質的状態変化、にするため)。`auto_rebuild` 有効でも health は再構築しない(「index スキーマ」参照。作りかけ・壊れた・索引でない index はエラー (2))。
 - **md レポート (`--md-report`)**: 揮発情報(実行時刻・鮮度)を含めず決定的に生成 → 「内容が変わった時だけ commit」運用。改行は **LF 固定**(Windows CRLF と Linux nightly LF で差分が出て決定性が壊れるのを防ぐ)。パスはレポート置き場からの相対 md リンク(`#` は %23、空白/括弧は `<>` wrap、`[]` はエスケープ、基底名衝突回避のため wikilink でなくパスリンク)。
 
 ## cross-platform 正しさ(テストで固定)
@@ -210,6 +225,7 @@ silent に壊れやすい箇所。いずれも過去に実運用で踏んだ har
 - **git 出力の encoding**: `--show-toplevel` / `ls-files` は UTF-8 で decode し、`core.quotepath=off`。非 ASCII パスが silent に壊れる/skip されるのを防ぐ。
 - **stdout encoding**: Windows で符号化不能文字(em dash 等)が混ざっても crash させず継続(console/リダイレクト時の挙動をテスト)。
 - **改行**: md レポートは LF 固定(health 参照)。
+- **index の差し替え**: Windows では SQLite が FILE_SHARE_DELETE 無しで開くので、開いている index を rename で置き換えられない。リトライして、だめなら直前の index を残してエラーにする(`index_safety_` のテストで固定し、CI は Windows でも流す)。
 
 ## golden テスト
 
