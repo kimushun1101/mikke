@@ -35,7 +35,6 @@ jobs:
 
   # Windows だけ経路が違う所がある (開いている index の差し替え、パスの区切り、CRLF の checkout)。
   # 既定の feature で全テストを流す (semantic feature は Linux の job で流す)。
-  # golden_md_report は Windows でリンクが壊れる既知の不具合 (#60) のため、直すまで外す
   test-windows:
     runs-on: windows-latest
     steps:
@@ -43,7 +42,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: test
-        run: cargo test --locked -- --skip golden_md_report
+        run: cargo test --locked
 
   install-script:
     runs-on: ubuntu-latest

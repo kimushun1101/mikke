@@ -330,6 +330,13 @@ pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("/"));
+        // root は canonicalize 済みで、Windows では `\\?\C:\...` の形になる。
+        // 置き場もそろえないと relpath の共通部分が 0 になり、リンクが絶対パスになる (#60)
+        let report_dir = if cfg!(windows) {
+            std::fs::canonicalize(&report_dir).unwrap_or(report_dir)
+        } else {
+            report_dir
+        };
         if !sections.is_empty() {
             for (heading, items) in &sections {
                 lines.push(format!("## {heading}"));
