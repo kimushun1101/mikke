@@ -92,7 +92,7 @@ jobs:
       run:
         shell: powershell
     env:
-      SMOKE_VERSION: v0.4.1
+      SMOKE_VERSION: v0.5.0
     steps:
       - uses: actions/checkout@v7
       # irm | iex 相当: ダウンロード内容は BOM を含んだ文字列のまま iex に渡る (ファイル実行と違い
@@ -144,7 +144,7 @@ jobs:
           if ($resolved -ne $expectedExe) { throw "Get-Command mikke resolved to $resolved, expected $expectedExe" }
           # 配列に受ける (| Select-Object -First 1 でパイプラインを早期停止すると native の $LASTEXITCODE が -1 になる競合がある)
           $version = @(& mikke --version)[0]
-          if ($version -notmatch "^mikke 0\.4\.1\b") { throw "unexpected version output: $version" }
+          if ($version -notmatch "^mikke 0\.5\.0\b") { throw "unexpected version output: $version" }
       # (b) MIKKE_NO_MODIFY_PATH ではユーザー PATH (レジストリ) を変えず、手動追加の案内を出すこと
       - name: install with MIKKE_NO_MODIFY_PATH (leaves the user PATH alone)
         run: |
