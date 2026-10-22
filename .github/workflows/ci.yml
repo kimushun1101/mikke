@@ -79,7 +79,7 @@ jobs:
       run:
         shell: powershell
     env:
-      SMOKE_VERSION: v0.3.1
+      SMOKE_VERSION: v0.4.0
     steps:
       - uses: actions/checkout@v7
       # irm | iex 相当: ダウンロード内容は BOM を含んだ文字列のまま iex に渡る (ファイル実行と違い
