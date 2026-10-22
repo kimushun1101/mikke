@@ -2,11 +2,14 @@
 
 #![allow(dead_code)]
 
-use crate::config::{load_config, to_posix, Config, CONFIG_FILENAMES};
+use crate::config::{load_scan_config, to_posix, warn_once, Config, CONFIG_FILENAMES};
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ignore::Match;
 use regex::Regex;
 use serde_yaml_ng::{Mapping, Value};
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 /// 1 ノートのパース結果。
@@ -204,6 +207,131 @@ pub fn iter_notes(cfg: &Config) -> Vec<(PathBuf, PathBuf)> {
     out
 }
 
+/// rel (repo root 相対の posix パス) が prefix そのものか、その配下か (要素単位。state は statement に当たらない)。
+fn under_prefix(rel: &str, prefix: &str) -> bool {
+    rel == prefix || (rel.starts_with(prefix) && rel.as_bytes().get(prefix.len()) == Some(&b'/'))
+}
+
+/// [scan] exclude_paths に当たるか。
+fn excluded_by_path(cfg: &Config, rel_repo: &str) -> bool {
+    cfg.exclude_paths.iter().any(|p| under_prefix(rel_repo, p))
+}
+
+/// index / embeddings の出力先の配下のファイルか (ディレクトリには当てない。出力先の下のネスト repo は歩く)。
+fn in_output_dir(cfg: &Config, rel_repo: &str) -> bool {
+    cfg.exclude_path_prefixes.iter().any(|p| {
+        rel_repo.starts_with(p.as_str()) && rel_repo.as_bytes().get(p.len()) == Some(&b'/')
+    })
+}
+
+/// [scan] respect_gitignore の判定。浅い順に (置き場所のディレクトリ, matcher) を持つ。
+#[derive(Clone, Default)]
+struct GitIgnores(Vec<(Rc<Path>, Rc<Gitignore>)>);
+
+impl GitIgnores {
+    /// root より上で最も近い `.git` を持つディレクトリから root までの規則を積む
+    /// (`.git` が無ければ root の .gitignore だけ)。root 自身とその上は判定しない。
+    fn for_root(root: &Path) -> Self {
+        let mut dirs: Vec<&Path> = Vec::new();
+        let mut found = false;
+        for a in root.ancestors() {
+            dirs.push(a);
+            if a.join(".git").exists() {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            dirs = vec![root];
+        }
+        dirs.into_iter()
+            .rev()
+            .fold(Self::default(), |g, d| g.enter(d))
+    }
+
+    /// dir に入った後の規則。`.git` を持つ dir (git repo の境界) では外側の規則を捨てる。
+    /// info/exclude を先に積むので、同じ repo のどの .gitignore よりも優先度が低い (git と同じ)。
+    fn enter(&self, dir: &Path) -> Self {
+        let git = dir.join(".git");
+        let mut next = if git.exists() {
+            let mut g = Self::default();
+            let exclude = git.join("info").join("exclude");
+            if git.is_dir() && exclude.is_file() {
+                g.push(dir, &exclude);
+            }
+            g
+        } else {
+            self.clone()
+        };
+        let gitignore = dir.join(".gitignore");
+        if gitignore.is_file() {
+            next.push(dir, &gitignore);
+        }
+        next
+    }
+
+    fn push(&mut self, dir: &Path, file: &Path) {
+        if let Some(gi) = build_ignore(dir, file) {
+            self.0.push((Rc::from(dir), Rc::new(gi)));
+        }
+    }
+
+    /// 深い層から照らし、最初に一致した結果 (無視 / 否定) を返す。
+    /// 各層の置き場所からの相対パスで照らす (Windows の verbatim パスでも前方一致に頼らないため)。
+    fn ignored(&self, path: &Path, is_dir: bool) -> bool {
+        for (dir, gi) in self.0.iter().rev() {
+            let Ok(rel) = path.strip_prefix(dir) else {
+                continue;
+            };
+            if rel.as_os_str().is_empty() {
+                continue;
+            }
+            match gi.matched(rel, is_dir) {
+                Match::Ignore(_) => return true,
+                Match::Whitelist(_) => return false,
+                Match::None => {}
+            }
+        }
+        false
+    }
+}
+
+/// file (.gitignore か info/exclude) の matcher を作る。大文字小文字は区別する。
+/// 解釈できない行は警告して捨て、残りの行は使う。UTF-8 でない行も、その行だけを読み替えて残りを生かす
+/// (GitignoreBuilder::add は UTF-8 でない行で読むのをやめるため、行ごとに渡す)。
+fn build_ignore(dir: &Path, file: &Path) -> Option<Gitignore> {
+    let mut b = GitignoreBuilder::new(dir);
+    let bytes = match std::fs::read(file) {
+        Ok(b) => b,
+        Err(e) => {
+            warn_once(format!("{}: 読めないため無視します ({e})", file.display()));
+            return None;
+        }
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    for (i, line) in text.lines().enumerate() {
+        if let Err(e) = b.add_line(Some(file.to_path_buf()), line) {
+            warn_once(format!(
+                "{}: {} 行目を解釈できないため無視します ({e})",
+                file.display(),
+                i + 1
+            ));
+        }
+    }
+    match b.build() {
+        Ok(gi) if gi.is_empty() => None,
+        Ok(gi) => Some(gi),
+        Err(e) => {
+            warn_once(format!(
+                "{}: 一部を解釈できないため無視します ({e})",
+                file.display()
+            ));
+            None
+        }
+    }
+}
+
 /// repo (cfg) の include 起点 1 つを走査する。起点自身がネスト repo ならそちらへ委譲。
 fn walk_include(cfg: &Config, inc: &str, top_root: &Path, files: &mut Vec<(PathBuf, PathBuf)>) {
     let base = match cfg.root.join(inc).canonicalize() {
@@ -221,30 +349,68 @@ fn walk_include(cfg: &Config, inc: &str, top_root: &Path, files: &mut Vec<(PathB
     }) {
         return;
     }
+    // 起点が exclude_paths の配下
+    if excluded_by_path(cfg, &to_posix(base_rel)) {
+        return;
+    }
+    let mut ig = cfg
+        .respect_gitignore
+        .then(|| GitIgnores::for_root(&cfg.root));
+    if let Some(g) = ig.as_mut() {
+        // root 自身は判定しない。root から起点まで 1 段ずつ判定しながら層を積む
+        let mut d = cfg.root.clone();
+        for c in base_rel.components() {
+            d.push(c);
+            if g.ignored(&d, true) {
+                return;
+            }
+            *g = g.enter(&d);
+        }
+    }
     if base != cfg.root && has_config(&base) {
-        walk_nested(&base, top_root, files);
+        walk_nested(cfg, &base, top_root, files);
     } else {
-        walk_dir(&base, cfg, top_root, files);
+        walk_dir(&base, cfg, ig.as_ref(), top_root, files);
     }
 }
 
 /// ネスト repo のルート設定を読み、その include 起点群へ委譲走査する (孫以深も再帰)。
-/// 子設定が壊れている場合は load_config が path 付きで即エラー終了する (silent に親規則で走査しない)。
+/// load_scan_config が子の [scan]/[index] と TOML の構文を検査し、誤りは path 付きで即エラー終了する
+/// (silent に親規則で走査しない)。
 ///
 /// 再帰は必ず停止する (サイクル不能): (1) ディレクトリ symlink は walk_dir が辿らない
 /// (entry.file_type() は lstat 相当で、symlink は is_dir() false)、(2) repo 外を指す
 /// include は walk_include の strip_prefix で弾かれる、(3) 委譲は「repo ルートの真部分
 /// ディレクトリ」に対してのみ起きるため canonical パス深度が単調増加する。
-fn walk_nested(root: &Path, top_root: &Path, files: &mut Vec<(PathBuf, PathBuf)>) {
-    let child = load_config(root.to_path_buf());
+fn walk_nested(parent: &Config, root: &Path, top_root: &Path, files: &mut Vec<(PathBuf, PathBuf)>) {
+    // 親の exclude_paths は境界の入口までしか効かない。中を指す値は知らせる
+    if let (Ok(r), Some(cfg_path)) = (root.strip_prefix(&parent.root), &parent.config_path) {
+        let rel = to_posix(r);
+        let pfx = format!("{rel}/");
+        for v in &parent.exclude_paths {
+            if let Some(rest) = v.strip_prefix(&pfx) {
+                warn_once(format!(
+                    "{}: [scan] exclude_paths の \"{v}\" はネストしたノート repo ({rel}) の中を指すため効きません ({rel} の設定ファイルの exclude_paths に \"{rest}\" と書きます)",
+                    cfg_path.display()
+                ));
+            }
+        }
+    }
+    let child = load_scan_config(root.to_path_buf());
     for inc in &child.include {
         walk_include(&child, inc, top_root, files);
     }
 }
 
-/// repo (cfg) の走査規則で dir 直下を歩く。ネスト repo 境界の検知は
-/// 親の exclude_dirs 判定より後 (= 親はディレクトリ名で入口ごと塞げる)。
-fn walk_dir(dir: &Path, cfg: &Config, top_root: &Path, files: &mut Vec<(PathBuf, PathBuf)>) {
+/// repo (cfg) の走査規則で dir 直下を歩く。親の exclude_dirs / exclude_paths / .gitignore の判定は
+/// ネスト境界の検知より先 (= 入口ごと塞げる)。
+fn walk_dir(
+    dir: &Path,
+    cfg: &Config,
+    ig: Option<&GitIgnores>,
+    top_root: &Path,
+    files: &mut Vec<(PathBuf, PathBuf)>,
+) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -256,28 +422,29 @@ fn walk_dir(dir: &Path, cfg: &Config, top_root: &Path, files: &mut Vec<(PathBuf,
             Err(_) => continue,
         };
         let name = entry.file_name().to_string_lossy().into_owned();
+        // exclude_paths と出力先の除外は、この repo のルート相対で判定する
+        let Ok(rel_repo) = path.strip_prefix(&cfg.root) else {
+            continue;
+        };
+        let rel_repo = to_posix(rel_repo);
         if ft.is_dir() {
-            if cfg.exclude_dirs.contains(&name) {
+            if cfg.exclude_dirs.contains(&name)
+                || excluded_by_path(cfg, &rel_repo)
+                || ig.is_some_and(|g| g.ignored(&path, true))
+            {
                 continue;
             }
             if has_config(&path) {
-                walk_nested(&path, top_root, files);
+                walk_nested(cfg, &path, top_root, files);
             } else {
-                walk_dir(&path, cfg, top_root, files);
+                let next = ig.map(|g| g.enter(&path));
+                walk_dir(&path, cfg, next.as_ref(), top_root, files);
             }
         } else if name.ends_with(".md") && path.is_file() {
-            if cfg.exclude_files.contains(&name) {
-                continue;
-            }
-            // index/embeddings の出力先除外はこの repo のルート相対 prefix で判定する
-            let Ok(rel_repo) = path.strip_prefix(&cfg.root) else {
-                continue;
-            };
-            let rel_repo_posix = to_posix(rel_repo);
-            if cfg
-                .exclude_path_prefixes
-                .iter()
-                .any(|pfx| rel_repo_posix.starts_with(&format!("{pfx}/")))
+            if cfg.exclude_files.contains(&name)
+                || excluded_by_path(cfg, &rel_repo)
+                || in_output_dir(cfg, &rel_repo)
+                || ig.is_some_and(|g| g.ignored(&path, false))
             {
                 continue;
             }

@@ -69,6 +69,8 @@ mikke hybrid クエリ        # BM25 + semantic の RRF 融合
 enabled = true   # semantic / hybrid の意味検索を使う場合のみ (既定 false。mikke embed の前提)
 ```
 
+走査から外す `exclude_dirs` / `exclude_files` は名前の完全一致で、どの深さにも効く。パスや glob は効かない。root 相対のパスで 1 か所だけ外すには `exclude_paths` (例: `exclude_paths = ["state"]`)、`.gitignore` に従うには `respect_gitignore = true` を使う (既定では `.gitignore` を見ない)。未知のキーや効かない値は stderr に警告し、型の違いはエラー (exit 2) にする。
+
 全キーの注釈付きサンプルは [docs/SPEC.md](docs/SPEC.md) の「設定スキーマ」を参照。
 
 ## semantic / hybrid 検索

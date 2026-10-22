@@ -31,7 +31,7 @@ grep の慣習に合わせる。呼び出し側は出力文言でなく exit cod
 |---|---|
 | 検索系(find / tag / title / semantic / hybrid)で 1 件以上ヒット。links / backlinks で結果 1 件以上。その他コマンドの正常終了 | 0 |
 | 検索系で 0 件。links / backlinks で結果 0 件 | 1 |
-| エラー(設定の型不一致・ルート未特定・index open 失敗・`[index] path` が mikke の index でない既存ファイルや `.md` で終わる名前を指す・作りかけや壊れた index を既定の検索や health で開いた・index を差し替えられない(Windows で他のプロセスが開いている)・semantic 無効ビルド/無効 repo での semantic / embed 等) | 2 |
+| エラー(設定の型不一致・`[scan] exclude_paths` の不正な値 (空文字・絶対パス・`..`・`\`・制御文字・root そのもの)・ルート未特定・index open 失敗・`[index] path` が mikke の index でない既存ファイルや `.md` で終わる名前を指す・作りかけや壊れた index を既定の検索や health で開いた・index を差し替えられない(Windows で他のプロセスが開いている)・semantic 無効ビルド/無効 repo での semantic / embed 等) | 2 |
 
 - links / backlinks の「結果」は検索系のヒットに準ずる: links は対象 target 数(解決可否を問わず — 未解決の列挙も結果)、backlinks は被リンク元ノート数。`<note>` 引数が解決できない場合(該当なし・複数一致)は結果 0 件でなく入力エラーの 2(「リンクグラフ」参照)
 - 一覧系(list-tags / recent)は「0 件も正常な状態報告」なので 0 のまま(recent は index 生存確認にも使う)
@@ -49,9 +49,11 @@ grep の慣習に合わせる。呼び出し側は出力文言でなく exit cod
 
 ```toml
 [scan]
-include = ["."]                 # ルート相対の走査起点(複数可、重複除去)
-exclude_dirs = []            # 指定でデフォルト置換。既定: .obsidian .claude .agents .codex .cursor .gemini .git .venv __pycache__ node_modules templates dist build
-exclude_files = ["README.md", "CLAUDE.md", "AGENTS.md", "GEMINI.md"]
+include = ["."]                 # ルート相対の走査起点(ディレクトリのみ。複数可、重複除去)
+exclude_dirs = []            # ディレクトリ名の完全一致(任意の深さ。パス・glob は効かない)。指定でデフォルト置換。既定: .obsidian .claude .agents .codex .cursor .gemini .git .venv __pycache__ node_modules templates dist build
+exclude_files = ["README.md", "CLAUDE.md", "AGENTS.md", "GEMINI.md"]   # ファイル名の完全一致(パス・glob は効かない)
+exclude_paths = []              # root 相対のパス(区切りは /)。そのパスと配下を外す(要素単位)。exclude_dirs の既定とは独立
+respect_gitignore = false       # true で .gitignore と .git/info/exclude が無視するパスを走査しない
 
 [index]
 path = ".mikke/index.sqlite"           # gitignore すること (同じフォルダに <path>.lock と、作り直し中の <path>.tmp-<pid> もできる)
@@ -79,19 +81,27 @@ exec_bit_prefixes = []                 # 配下 tracked *.sh に実行 bit を�
 disable = []                           # 項目単位で無効化するチェック名 (health 判定を参照)
 ```
 
-**設定読み込みの厳格さ**: 型不一致は silent に誤動作させず即エラー終了する。特に「文字列配列指定に文字列を渡すと 1 文字ずつに分解される」事故を型検査で弾く。`bool` は整数指定に紛れ込ませない。BOM 付き TOML (utf-8-sig) を許容。
+**設定読み込みの厳格さ**: 型不一致は silent に誤動作させず即エラー終了する。特に「文字列配列指定に文字列を渡すと 1 文字ずつに分解される」事故を型検査で弾く。`bool` は整数指定に紛れ込ませない。BOM 付き TOML (utf-8-sig) を許容。エラーと警告の線引きは次のとおり:
+
+- エラー(exit 2、設定ファイルの path 付き): TOML の構文、型の不一致(`exclude_paths` は文字列の配列、`respect_gitignore` は真偽値)、`[health] disable` の未知の名前(最上位の設定だけ)、`[index] path` の `.md`、`exclude_paths` の不正な値(空文字・制御文字・`\`・絶対パス・`..`・root そのもの)
+- 警告(stderr。exit code と stdout は変えない): 未知の節・キーと節の外のキー(近い既知のキーや、そのキーを持つ節があれば `(exclude_dirs ?)` / `([index] auto_rebuild ?)` / `([scan] ?)` の形で添える)、`exclude_dirs` / `exclude_files` の `/`(Windows では `\` も。名前と一致しえない)と `*` `?`(glob として扱わない)、`exclude_paths` の `*` `?`、`include` に書いたファイル、ネスト repo の中を指す親の `exclude_paths`、解釈できない `.gitignore` の行
+- 未知のキーをエラーにしないのは、新しい版で足したキーを書いた設定を古い版で読んでも止めないため。存在しない `include` / `exclude_paths` と root の外を指す `include` は警告しない(マシンによって無いフォルダや後から作るフォルダを書く使い方を壊さないため)
+- 同じ警告は 1 回の実行で 1 度だけ出す(ネスト repo の設定は 1 回の実行で何度か読み直すため)。実行のたびには出る(`auto_rebuild` の検索ごとにも出る)
+
 **常に除外**: 設定に関わらず `.git` と `.mikke` は走査対象外(`exclude_dirs` をデフォルト置換しても、ネスト repo の設定でも生きる)。index/embeddings の出力先は「そのパス配下」を**root 相対 prefix 一致**で除外する(ディレクトリ名一致だと同名ディレクトリが任意の深さで全消えする事故になるため)。**ディレクトリ symlink は辿らない**(ループ防止。ファイル symlink の `.md` は対象)。
+**パスでの除外**: 名前一致の `exclude_dirs` / `exclude_files` は任意の深さに効く。1 か所だけを外すなら、root 相対の `exclude_paths` を使う。判定は要素単位で、`state` は `state/...` に当たり `statement/...` に当たらない。ディレクトリは入る前に外す。ファイルを指す値はそのファイルだけを外す(出力先の除外は今までどおり配下の `.md` ファイルにだけ当て、出力先の下のネスト repo は歩く)。include の起点が配下にあれば、起点も外す(除外は include に勝つ)。末尾の `/`、先頭の `./`、重複した `/`、途中の `.` は吸収する。大文字小文字は区別する。`exclude_dirs` の既定とは独立で、書いても既定は残る。
+**`.gitignore`**(`[scan] respect_gitignore`。既定 false で `.gitignore` を見ない): true の時は、root から上で最も近い `.git` を持つディレクトリから下の各 `.gitignore` と、その `.git/info/exclude` を git と同じ優先順で読む(深い `.gitignore` が勝ち、`info/exclude` が最も弱い。`!` の否定も効くが、除外されたディレクトリの中は否定で戻せない)。`.git` が見つからなければ root から下の `.gitignore` だけを読む(異常終了も警告もしない。コピーや展開で `.git` が無くなっても宣言は残るため)。root 自身と root より上は判定しない(上の `.gitignore` は root の下のパスにだけ当てる)。追跡済みのファイルでも、パターンに一致すれば外す(git の追跡状態は見ない。残すには `!path` を書く)。global excludes(`core.excludesFile`)・`.ignore` は読まない(索引の中身をマシンと利用者の設定に依存させないため)。大文字小文字はどの OS でも区別する(`core.ignorecase` は見ない)。`.git` を持つ下位のディレクトリ(ネストした git repo・submodule)では外側の規則を捨てて読み直し、その入口は外側の規則で判定する。`.git` がファイルの時は `info/exclude` を読まない。判定の順は、名前(`exclude_dirs` / `exclude_files`)→ パス(`exclude_paths`。ファイルは出力先も)→ `.gitignore` → ネスト境界。どれに当たっても結果は「外す」なので、順は性能にだけ効く。
 **`[index] path` の検査**: `.md` で終わる path は、大文字小文字を区別せず、ファイルの有無によらず設定エラーにする(走査は名前が `.md` で終わるファイルを拾うので、index がノートとして走査され、既存のノートを上書きするおそれがあるため)。既存のファイルは、mikke の index か作りかけの index と確かめられた時だけ作り直す。それ以外は消さずに exit 2 にし、path と理由を出す(判定は「index スキーマ」の自動再構築を参照)。root の外の絶対パスも使える(同じ検査で守る)。
 
 ## ネストしたノート repo
 
 走査中に `mikke.toml` / `.mikke.toml` を持つサブディレクトリへ入った場合、その配下は「ネストしたノート repo」として走査を**その repo の設定へ委譲**する:
 
-- 委譲されるのは `[scan]`(include / exclude_dirs / exclude_files)と `[index]` の出力先除外(ネスト repo ルート相対の prefix で判定)。孫 repo 以深も同ルールで再帰する
-- 親の exclude はネスト境界の**入口まで**効く(親の `exclude_dirs` にディレクトリ名を挙げればネスト repo ごと除外できる)。境界検知は親の除外判定より後
+- 委譲されるのは `[scan]`(include / exclude_dirs / exclude_files / exclude_paths / respect_gitignore)と `[index]` の出力先除外。`exclude_paths` と出力先は、ネスト repo の root 相対で判定する。子で書かないキーは既定に戻り、親の値を継がない(`respect_gitignore` も子の値に従う。子が true なら、同じ作業ツリーの親の `.gitignore` も子の中に効く)。孫 repo 以深も同ルールで再帰する
+- 親の除外(`exclude_dirs` / `exclude_paths` / `.gitignore`)はネスト境界の**入口まで**効く(親の `exclude_dirs` にディレクトリ名を挙げるか、`exclude_paths = ["sub"]` でネスト repo ごと除外できる)。境界検知は親の除外判定より後。境界の内側を指す親の `exclude_paths` は効かず、警告を出す
 - index は最上位の**単一 index のまま**で、path は最上位 root 相対。BM25 スコアの一貫性(単一 corpus)を保つため、ネスト repo が持つ index を別に引くフェデレーションは行わない
-- ネスト repo の `[health]` / `[search]` / `[semantic]` は無視する(health の除外は最上位の `scan_skip_prefixes` / `quality_skip_prefixes` で指定する)
-- ネスト repo の設定が壊れている場合も通常どおり対象ファイルの path 付きで即エラー終了する(silent に親規則で走査しない)
+- ネスト repo の設定は `[scan]` と `[index]` だけを読む。`[health]` / `[search]` / `[semantic]` は読まない(型も未知のキーも検査しない。health の除外は最上位の `scan_skip_prefixes` / `quality_skip_prefixes` で指定する)。その repo を直接開けば最上位として全部を検査するので、親の実行で二重に報告しない
+- TOML の構文エラーと `[scan]` / `[index]` の型エラー・不正な値は、path 付きで即エラー終了する(silent に親規則で走査しない)。未知の節と `[scan]` / `[index]` の未知のキー・効かない値は、子の path で警告する
 
 ## ノートの解釈
 
@@ -131,7 +141,7 @@ index が無い場合は検索時に自動 build(clone 直後フォールバッ�
 
 `health` は、無ければ作り、作りかけ・表の欠けた・mikke の index でない・読めない index は exit 2 にする。形式違いと generated 無しは作り直さず、鮮度判定も通らない(再構築すると index 鮮度診断がマスクされるため)。`mikke index` は、mikke の index でない・読めないファイルは exit 2 にし、それ以外(作りかけを含む)は告知なしで作り直す。作り直す前にロックを取って判定し直すので、並行した検索でも作り直しは 1 回で、告知も 1 本になる。
 
-stale 判定は次のいずれか: (a) いずれかの md の mtime が `meta['generated']` より新しい、(b) 走査 path 集合の SHA-256 が `meta['scanned_paths_sha256']` と不一致(mtime が保存される移動・リネームや追加・削除も検知)、(c) path 集合の meta キーが無い index。走査 md 件数と notes 行数の比較は行わない(frontmatter 破損で index から除外されるファイルがあると恒常 stale 化するため、スナップショットは破損分も含む走査 path 全体で取る)。対象は BM25 index のみで embeddings は対象外(semantic 側の鮮度は `mikke embed` の差分更新に委ねる)。限界と副作用: mtime を保存する copy(rsync -t 等)による内容変更は検知できない。有効時は検索のたびに全 md 走査 + metadata 取得のコストがかかり、ネスト repo の設定が壊れている場合は検索コマンド自体が path 付きで即エラー終了するようになる(fail-loud 方針と整合)。
+stale 判定は次のいずれか: (a) いずれかの md の mtime が `meta['generated']` より新しい、(b) 走査 path 集合の SHA-256 が `meta['scanned_paths_sha256']` と不一致(mtime が保存される移動・リネームや追加・削除も検知)、(c) path 集合の meta キーが無い index。`.gitignore` の編集や `exclude_paths` / `respect_gitignore` の変更で走査対象が変わった時も、走査 path 集合のハッシュで検知する。走査 md 件数と notes 行数の比較は行わない(frontmatter 破損で index から除外されるファイルがあると恒常 stale 化するため、スナップショットは破損分も含む走査 path 全体で取る)。対象は BM25 index のみで embeddings は対象外(semantic 側の鮮度は `mikke embed` の差分更新に委ねる)。限界と副作用: mtime を保存する copy(rsync -t 等)による内容変更は検知できない。有効時は検索のたびに全 md 走査 + metadata 取得のコストがかかり、ネスト repo の設定が壊れている場合は検索コマンド自体が path 付きで即エラー終了するようになる(fail-loud 方針と整合)。
 
 ## 検索セマンティクス
 
@@ -225,6 +235,7 @@ silent に壊れやすい箇所。いずれも過去に実運用で踏んだ har
 - **git 出力の encoding**: `--show-toplevel` / `ls-files` は UTF-8 で decode し、`core.quotepath=off`。非 ASCII パスが silent に壊れる/skip されるのを防ぐ。
 - **stdout encoding**: Windows で符号化不能文字(em dash 等)が混ざっても crash させず継続(console/リダイレクト時の挙動をテスト)。
 - **改行**: md レポートは LF 固定(health 参照)。
+- **パスの区切り**: `exclude_paths` は OS によらず `/` で書く(`\` はエラー)。判定は root 相対の posix 表現で比べる。`.gitignore` は各ファイルの置き場所からの相対パスで照らす(Windows の verbatim パスでも一致させるため)。大文字小文字はどの OS でも区別する。
 - **index の差し替え**: Windows では SQLite が FILE_SHARE_DELETE 無しで開くので、開いている index を rename で置き換えられない。リトライして、だめなら直前の index を残してエラーにする(`index_safety_` のテストで固定し、CI は Windows でも流す)。
 
 ## golden テスト

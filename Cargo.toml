@@ -31,6 +31,9 @@ serde_json = "1"
 serde_yaml_ng = "0.10"
 sha2 = "0.10"
 regex = "1"
+# [scan] respect_gitignore の .gitignore 解釈だけに使う (gitignore モジュールのみ。走査器は使わない)。
+# pure Rust で git コマンドも C ツールチェーンも要らず、musl static ビルドを壊さない。
+ignore = "0.4"
 
 # --- semantic feature 専用 (既定ビルドには入らない) ---
 candle-core = { version = "0.8", optional = true }
