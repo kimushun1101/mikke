@@ -236,7 +236,7 @@ silent に壊れやすい箇所。いずれも過去に実運用で踏んだ har
 - **stdout encoding**: Windows で符号化不能文字(em dash 等)が混ざっても crash させず継続(console/リダイレクト時の挙動をテスト)。
 - **改行**: md レポートは LF 固定(health 参照)。
 - **パスの区切り**: `exclude_paths` は OS によらず `/` で書く(`\` はエラー)。判定は root 相対の posix 表現で比べる。`.gitignore` は各ファイルの置き場所からの相対パスで照らす(Windows の verbatim パスでも一致させるため)。大文字小文字はどの OS でも区別する。
-- **index の差し替え**: Windows では SQLite が FILE_SHARE_DELETE 無しで開くので、開いている index を rename で置き換えられない。リトライして、だめなら直前の index を残してエラーにする(`index_safety_` のテストで固定し、CI は Windows でも流す)。
+- **index の差し替え**: Windows では SQLite が FILE_SHARE_DELETE 無しで開くので、開いている index を rename で置き換えられない。リトライして、だめなら直前の index を残してエラーにする(`index_safety_` のテストで固定する。CI は Windows でも全テストを流す)。
 
 ## golden テスト
 
