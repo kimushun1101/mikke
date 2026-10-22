@@ -302,8 +302,10 @@ fn index_is_stale(cfg: &Config) -> bool {
 }
 
 /// 現行の index format かを meta 1 行だけで判定する。
-/// 不一致と見なすのは、行が無い・meta テーブルが無い (旧形式)・DB でない (破損) 場合だけ。
-/// 開けない・ロック中などの読めない場合は None を返して後段へ任せる。
+/// 不一致と見なすのは、meta テーブルはあるが index_format の行が無い・値が違う場合だけ。
+/// mikke の index は初版から meta を持つので、meta が無い・DB でないファイルは index と
+/// 見なさず (作り直すと [index] path が指す既存ファイルを消してしまう)、開けない・
+/// ロック中などと同じく None を返して後段へ任せる。
 fn index_format_matches(cfg: &Config) -> Option<bool> {
     let conn = Connection::open(cfg.index_path()).ok()?;
     match conn.query_row(
@@ -313,12 +315,6 @@ fn index_format_matches(cfg: &Config) -> Option<bool> {
     ) {
         Ok(format) => Some(format == INDEX_FORMAT),
         Err(rusqlite::Error::QueryReturnedNoRows) => Some(false),
-        Err(rusqlite::Error::SqliteFailure(e, msg))
-            if e.code == rusqlite::ErrorCode::NotADatabase
-                || msg.as_deref().is_some_and(|m| m.contains("no such table")) =>
-        {
-            Some(false)
-        }
         Err(_) => None,
     }
 }
