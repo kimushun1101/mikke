@@ -1,7 +1,7 @@
 //! 検索コマンド群 (find / tag / title / semantic / hybrid / list-tags / recent / links / backlinks)。
 //!
 //! FTS 変換 (fts_query): 空白で語分割 → 各語を個別に `"..."` quote (内部 " は "") → AND 連結。
-//! find のクエリは AND 意味論と MATCH/LIKE 経路を保つため正規化しない。
+//! find のクエリは AND 意味論と MATCH/LIKE 経路を保つため空白を正規化せず、幅の畳み込み (fold_width) だけをかける。
 //! trigram 制約: 各語 3 文字以上なら `ORDER BY rank` (FTS5 BM25)。1 語でも <3 文字を含めば
 //!   LIKE フォールバック (全語 AND で mikke_lower(content/title) LIKE %term% で絞り、簡易スコア順)。
 //! find の見出し: 順序を正直に表示。bm25_limit 到達時は打ち切りを明示。
@@ -21,7 +21,7 @@
 
 use crate::config::Config;
 use crate::index;
-use crate::normalize::normalize_search_text;
+use crate::normalize::{fold_width, search_text};
 use rusqlite::functions::FunctionFlags;
 use rusqlite::{params, params_from_iter, Connection, OpenFlags};
 use std::collections::HashMap;
@@ -291,10 +291,7 @@ fn query_paths_top(conn: &Connection, sql: &str, param: &str, top: Option<u64>) 
 fn like_pattern(keyword: &str) -> String {
     let trimmed = keyword.trim();
     let keyword = if trimmed.is_empty() { keyword } else { trimmed };
-    format!(
-        "%{}%",
-        escape_like(&normalize_search_text(keyword).to_lowercase())
-    )
+    format!("%{}%", escape_like(&search_text(keyword).to_lowercase()))
 }
 
 /// tag / title の --top による打ち切り (find と同じ count >= N の保守的判定)。
@@ -518,13 +515,15 @@ fn is_match_path(keyword: &str) -> bool {
 pub fn cmd_find(cfg: &Config, words: &[String], top: Option<u64>, json: bool) -> usize {
     // 複数語は全語結合 (無クォートの複数語でも語落ちしない)。
     let keyword = words.join(" ");
+    // 検索には幅を畳んだ語を使い (語長の判定も畳んだ後)、見出しには打った語を出す
+    let folded = fold_width(&keyword);
     let conn = connect(cfg);
     // --top は bm25_limit の代わり (bm25_limit は既定値であって天井ではない)
     let limit = top.map_or(cfg.bm25_limit, |n| n as i64);
-    let paths = bm25_ranked_paths(&conn, &keyword, limit);
+    let paths = bm25_ranked_paths(&conn, &folded, limit);
     let notes = fetch_notes(&conn, &paths);
     // 短語 (<3字) を含むと trigram 不可で LIKE フォールバック (簡易スコア順)。順序の正体を正直に出す。
-    let relevance = is_match_path(&keyword);
+    let relevance = is_match_path(&folded);
     // 上限に達した場合は「全体がこの件数」と誤読されないよう打ち切りを明示する。
     let capped = notes.len() as i64 >= limit;
     if json {
@@ -812,8 +811,9 @@ pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize, json: bool) -> usize {
     let candidate_depth = top as i64 * cfg.candidate_factor; // 各ストリームから多めに取って融合する
     let conn = connect(cfg);
 
-    // --- ストリーム 1: BM25 ---
-    let bm25_paths = bm25_ranked_paths(&conn, query, candidate_depth);
+    // --- ストリーム 1: BM25 (幅を畳んだ語で引く。semantic には原文を渡す) ---
+    let folded = fold_width(query);
+    let bm25_paths = bm25_ranked_paths(&conn, &folded, candidate_depth);
     let bm25_rank: HashMap<&str, i64> = bm25_paths
         .iter()
         .enumerate()
@@ -883,7 +883,7 @@ pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize, json: bool) -> usize {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let relevance = is_match_path(query);
+    let relevance = is_match_path(&folded);
     if json {
         let mut meta = Meta::new("hybrid", notes.len());
         meta.order = Some(bm25_order(relevance));

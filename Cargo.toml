@@ -34,6 +34,8 @@ regex = "1"
 # [scan] respect_gitignore の .gitignore 解釈だけに使う (gitignore モジュールのみ。走査器は使わない)。
 # pure Rust で git コマンドも C ツールチェーンも要らず、musl static ビルドを壊さない。
 ignore = "0.4"
+# 検索用の幅の畳み込み (全角形・半角形の文字だけに NFKC をかける) に使う。pure Rust で musl static ビルドを壊さない。
+unicode-normalization = "0.1"
 
 # --- semantic feature 専用 (既定ビルドには入らない) ---
 candle-core = { version = "0.8", optional = true }

@@ -301,18 +301,92 @@ fn like_matches_non_ascii_case() {
     ] {
         assert_eq!(hit_paths(&root, &args), umlaut, "{args:?}");
     }
-    // 全角と半角は同一視しない
+    // 全角と半角は同一視する (#77)。全角の大文字小文字もそろう
+    let both = vec!["notes/ascii.md".to_string(), "notes/zen.md".to_string()];
     for args in [
         ["title", "ＧＰＳ"],
         ["tag", "ＧＰＳ"],
         ["find", "ＧＰ"],
         ["find", "ｇｐ"],
+        ["title", "GPS"],
+        ["tag", "gps"],
+        ["find", "Gp"],
     ] {
-        assert_eq!(hit_paths(&root, &args), zen, "{args:?}");
+        assert_eq!(hit_paths(&root, &args), both, "{args:?}");
     }
-    for args in [["title", "GPS"], ["tag", "gps"], ["find", "Gp"]] {
-        assert_eq!(hit_paths(&root, &args), ascii, "{args:?}");
+    // ASCII 以外の大文字小文字の同一視は、幅の畳み込みが無くても効く
+    assert_eq!(hit_paths(&root, &["find", "首輪を付"]), zen);
+    assert_eq!(hit_paths(&root, &["find", "collar on"]), ascii);
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// 全角形・半角形の幅を、索引とクエリの両方で畳む。表示は原文のまま (#77)。
+#[test]
+fn width_forms_fold_in_index_and_query() {
+    let root = temp_repo(
+        "width-fold",
+        &[
+            ("mikke.toml", ""),
+            (
+                "notes/zenkaku.md",
+                "---\ntitle: ＧＰＳ首輪の記録\ndate: 2026-01-10\ntags: [ＧＰＳ]\n---\nキツネにＧＰＳ首輪を付けた。個体番号はＡＢＣ１２３。ｷﾂﾈの巣穴を見た。ｶﾞｲﾄﾞを読む。ｶﾞﾝが飛んだ。\n",
+            ),
+            (
+                "notes/hankaku.md",
+                "---\ntitle: GPS首輪の記録\ndate: 2026-01-09\ntags: [GPS]\n---\nキツネにGPS首輪を付けた。個体番号はABC123。キツネの巣穴を見た。ガイドを読む。ガンが飛んだ。\n",
+            ),
+            ("notes/circled.md", "---\ntitle: 丸数字\ndate: 2026-01-08\n---\n手順①を読む。\n"),
+            ("notes/digit.md", "---\ntitle: 数字\ndate: 2026-01-07\n---\n手順1を読む。\n"),
+            ("notes/ideo-space.md", "---\ntitle: 字　下げ\ndate: 2026-01-06\n---\n本文。\n"),
+        ],
+    );
+    run(&root, &["index"]);
+    let both = vec![
+        "notes/hankaku.md".to_string(),
+        "notes/zenkaku.md".to_string(),
+    ];
+    for args in [
+        &["find", "GPS"][..],
+        &["find", "ＧＰＳ"],
+        &["find", "ｇｐｓ"],
+        &["find", "ABC123"],
+        &["find", "ＡＢＣ１２３"],
+        &["find", "ガイド"],
+        &["find", "ｶﾞｲﾄﾞ"],
+        &["find", "GP"],
+        &["find", "ＧＰ"],
+        &["find", "ガン"],
+        &["find", "ｶﾞﾝ"],
+        &["title", "GPS"],
+        &["title", "ＧＰＳ"],
+        &["title", "ｇｐｓ"],
+        &["tag", "GPS"],
+        &["tag", "ＧＰＳ"],
+    ] {
+        assert_eq!(hit_paths(&root, args), both, "{args:?}");
     }
+
+    // 表示は原文のまま。見出しは打った語のまま
+    let (out, _) = run(&root, &["find", "ＧＰＳ"]);
+    assert!(out.starts_with("全文検索 'ＧＰＳ' の結果 (2件"), "{out}");
+    assert!(
+        out.contains("ＧＰＳ首輪の記録") && out.contains("tags: ＧＰＳ"),
+        "{out}"
+    );
+    let (tags, _) = run(&root, &["list-tags"]);
+    assert!(
+        tags.contains("GPS (1件)") && tags.contains("ＧＰＳ (1件)"),
+        "{tags}"
+    );
+
+    // 幅以外は畳まない
+    assert_eq!(hit_paths(&root, &["find", "①"]), vec!["notes/circled.md"]);
+    assert_eq!(
+        hit_paths(&root, &["title", "字　下げ"]),
+        vec!["notes/ideo-space.md"]
+    );
+    assert!(hit_paths(&root, &["title", "字下げ"]).is_empty());
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -1087,7 +1161,7 @@ fn old_index_format_rebuilds_before_title_search() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(format, "2");
+    assert_eq!(format, "3");
     let _ = fs::remove_dir_all(&root);
 }
 

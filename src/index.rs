@@ -17,7 +17,7 @@
 #![allow(dead_code)]
 
 use crate::config::{display_path, to_posix, Config};
-use crate::normalize::normalize_search_text;
+use crate::normalize::search_text;
 use crate::scan;
 use rusqlite::{params, Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -87,7 +87,7 @@ const SCHEMA: &str = "
 const META_SCANNED_PATHS: &str = "scanned_paths_sha256";
 const META_INDEX_FORMAT: &str = "index_format";
 // 正規化規則 (src/normalize.rs) や検索用の列を変えた場合は上げる。
-const INDEX_FORMAT: &str = "2";
+const INDEX_FORMAT: &str = "3";
 
 /// 走査 path 集合 (root 相対 posix) のスナップショット: ソート済リストの SHA-256。
 /// mtime が保存される移動・リネームや追加・削除を auto_rebuild の stale 判定で検知する。
@@ -699,7 +699,7 @@ fn write_index(cfg: &Config, use_stderr: bool, lock: &BuildLock) -> BuildIssues 
         for tag in &note.tags {
             conn.execute(
                 "INSERT INTO tags (path, tag, tag_search) VALUES (?1, ?2, ?3)",
-                params![note.path_rel, tag, normalize_search_text(tag)],
+                params![note.path_rel, tag, search_text(tag)],
             )
             .expect("tags への INSERT に失敗");
         }
@@ -710,8 +710,8 @@ fn write_index(cfg: &Config, use_stderr: bool, lock: &BuildLock) -> BuildIssues 
             )
             .expect("links への INSERT に失敗");
         }
-        let fts_title = normalize_search_text(&note.title);
-        let fts_content = normalize_search_text(&note.content);
+        let fts_title = search_text(&note.title);
+        let fts_content = search_text(&note.content);
         conn.execute(
             "INSERT INTO notes_fts (path, title, content) VALUES (?1, ?2, ?3)",
             params![note.path_rel, fts_title, fts_content],
