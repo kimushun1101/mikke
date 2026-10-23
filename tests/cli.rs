@@ -705,6 +705,20 @@ fn golden_commands() {
     );
 }
 
+/// index 要約はネスト repo を一覧し、子の件数に孫ノートも含める。
+#[test]
+fn index_summary_lists_nested_repos() {
+    let root = temp_copy("nested-summary");
+    let (stdout, stderr) = run(&root, &["index"]);
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        stdout.ends_with(
+            "ネストしたノート repo: 2件\n  nested (mikke.toml): ノート 2件\n  nested/inner (.mikke.toml): ノート 1件\n"
+        ),
+        "ネスト repo の要約が想定と異なる:\n{stdout}\n{stderr}"
+    );
+}
+
 /// .mikke.toml がルートマーカー (上方探索) として効き、[scan] 設定も適用される。
 #[test]
 fn hidden_config_upward_search() {
