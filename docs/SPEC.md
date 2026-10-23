@@ -217,7 +217,7 @@ score/via は semantic/hybrid のみ。**summary 欠落を空白で黙らせな�
 - 埋め込みテキスト = `title\n summary\n 本文`。E5 系仕様で**ドキュメント側に passage_prefix、クエリ側に query_prefix**。normalize して保存。
 - 差分検出はファイル内容の SHA-256。model/passage_prefix 変更時は全再構築(既存ベクトルと混ぜると比較不能)。削除ノートは metadata から除外し、**削除のみの更新でも保存し直す**(消えたベクトルが結果に残り続けるのを防ぐ)。
 - 保存: `embeddings.safetensors`(vectors 行列)+ `metadata.json`(generated, model, query_prefix, passage_prefix, note_count, notes[{path,title,hash}])。順序 = vectors 行と一致。
-- 初回はモデルを HF から cache へ DL する(オフライン/社内網の考慮を README に)。
+- 初回はモデルを HF から cache へ DL する。cache の優先順は `HF_HUB_CACHE` → `$HF_HOME/hub` → `$XDG_CACHE_HOME/huggingface/hub` → 既定の `~/.cache/huggingface/hub`(空の値は未指定として扱う)。`HF_ENDPOINT` でミラーを指定できる(オフライン/社内網の導入手順は README に)。
 - semantic feature 無しビルド・バックエンド未実装の経路は silent 劣化させず、明示エラーで exit する(exit 2 — 「exit code」参照)。
 
 ## health 判定(決定的に)
