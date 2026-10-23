@@ -63,6 +63,9 @@ enum Command {
         /// いずれかの語を含むノートを検索する (OR)
         #[arg(long)]
         any: bool,
+        /// 各ノートで検索語が当たった行を最大 3 行表示する
+        #[arg(long)]
+        snippet: bool,
     },
     /// タグ検索 (部分一致, date (空なら updated) 降順)
     Tag {
@@ -182,7 +185,8 @@ fn main() {
             top,
             json,
             any,
-        } => Some(search::cmd_find(&cfg, &words, top, json, any)),
+            snippet,
+        } => Some(search::cmd_find(&cfg, &words, top, json, any, snippet)),
         Command::Tag { keyword, top, json } => Some(search::cmd_tag(&cfg, &keyword, top, json)),
         Command::Title { keyword, top, json } => Some(search::cmd_title(&cfg, &keyword, top, json)),
         Command::ListTags { json } => {
