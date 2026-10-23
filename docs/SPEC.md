@@ -105,6 +105,7 @@ disable = []                           # 項目単位で無効化するチェッ
 
 ## ノートの解釈
 
+- **破損 frontmatter**: YAML として読めない frontmatter は、閉じ `---` 欠落と同じく metadata 空・frontmatter の生の行を含む全文を本文として扱う。
 - **title 抽出優先順**: frontmatter `title` → 最初の `# ` 見出し → ファイル名 stem。
 - **tags**: YAML sequence の null / 空文字列要素は登録しない。特に `- #Dog` は YAML ではコメントだけの null 要素であり、`Dog` へ復元しない (`- Dog` が修正例)。`- "#Dog"` は有効な文字列としてそのまま登録する。有効な重複タグは最初の出現を残して重複除去する (tags を文字列で書いた場合の 1 文字分解 quirk にも同じ重複除去を適用)。出現順は登録するタグ集合の決定にのみ効き、検索出力のタグ表示は従来どおりタグ名順。空要素は通常の `index` で path 付き警告、`health` で修正対象として報告し、`index --check` は構築完了後に exit 1 とする。
 - **date 正規化**: date/updated は `YYYY-MM-DD` 文字列へ。YAML が date 型で解釈した場合も文字列化して揃える。
@@ -141,7 +142,7 @@ index が無い場合は検索時に自動 build(clone 直後フォールバッ�
 
 `health` は、無ければ作り、作りかけ・表の欠けた・mikke の index でない・読めない index は exit 2 にする。形式違いと generated 無しは作り直さず、鮮度判定も通らない(再構築すると index 鮮度診断がマスクされるため)。`mikke index` は、mikke の index でない・読めないファイルは exit 2 にし、それ以外(作りかけを含む)は告知なしで作り直す。作り直す前にロックを取って判定し直すので、並行した検索でも作り直しは 1 回で、告知も 1 本になる。
 
-stale 判定は次のいずれか: (a) いずれかの md の mtime が `meta['generated']` より新しい、(b) 走査 path 集合の SHA-256 が `meta['scanned_paths_sha256']` と不一致(mtime が保存される移動・リネームや追加・削除も検知)、(c) path 集合の meta キーが無い index。`.gitignore` の編集や `exclude_paths` / `respect_gitignore` の変更で走査対象が変わった時も、走査 path 集合のハッシュで検知する。走査 md 件数と notes 行数の比較は行わない(frontmatter 破損で index から除外されるファイルがあると恒常 stale 化するため、スナップショットは破損分も含む走査 path 全体で取る)。対象は BM25 index のみで embeddings は対象外(semantic 側の鮮度は `mikke embed` の差分更新に委ねる)。限界と副作用: mtime を保存する copy(rsync -t 等)による内容変更は検知できない。有効時は検索のたびに全 md 走査 + metadata 取得のコストがかかり、ネスト repo の設定が壊れている場合は検索コマンド自体が path 付きで即エラー終了するようになる(fail-loud 方針と整合)。
+stale 判定は次のいずれか: (a) いずれかの md の mtime が `meta['generated']` より新しい、(b) 走査 path 集合の SHA-256 が `meta['scanned_paths_sha256']` と不一致(mtime が保存される移動・リネームや追加・削除も検知)、(c) path 集合の meta キーが無い index。`.gitignore` の編集や `exclude_paths` / `respect_gitignore` の変更で走査対象が変わった時も、走査 path 集合のハッシュで検知する。走査 md 件数と notes 行数の比較は行わない(読込不可で index から除外されるファイルがあると恒常 stale 化するため、スナップショットは読込不可分も含む走査 path 全体で取る)。対象は BM25 index のみで embeddings は対象外(semantic 側の鮮度は `mikke embed` の差分更新に委ねる)。限界と副作用: mtime を保存する copy(rsync -t 等)による内容変更は検知できない。有効時は検索のたびに全 md 走査 + metadata 取得のコストがかかり、ネスト repo の設定が壊れている場合は検索コマンド自体が path 付きで即エラー終了するようになる(fail-loud 方針と整合)。
 
 ## 検索セマンティクス
 

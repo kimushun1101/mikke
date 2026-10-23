@@ -157,8 +157,8 @@ fn detect_frontmatter(text: &str) -> bool {
     dashes >= 3 && first[dashes..].trim().is_empty()
 }
 
-/// frontmatter の分離。YAML パース失敗のみ None (呼び出し側で warning)。
-/// 閉じ `---` 欠落はエラーにせず metadata 空 + 全文 content として扱う (破損検知は health が担う)。
+/// frontmatter の分離。閉じ `---` 欠落と YAML パース失敗はエラーにせず、
+/// metadata 空 + 全文 content として扱う (破損検知は scan_frontmatter_issue が担う)。
 fn split_frontmatter(text: &str) -> Option<(Mapping, String)> {
     if !detect_frontmatter(text) {
         return Some((Mapping::new(), text.to_string()));
@@ -174,7 +174,7 @@ fn split_frontmatter(text: &str) -> Option<(Mapping, String)> {
         return Some((Mapping::new(), content));
     }
     match serde_yaml_ng::from_str::<Value>(fm) {
-        Err(_) => None,
+        Err(_) => Some((Mapping::new(), text.to_string())),
         Ok(Value::Mapping(m)) => Some((m, content)),
         Ok(_) => Some((Mapping::new(), content)), // dict 以外は metadata 扱いしない
     }
@@ -461,7 +461,7 @@ fn walk_dir(
     }
 }
 
-/// frontmatter を読んで Note を作る。読込/パース失敗は None (呼び出し側で warning)。
+/// frontmatter を読んで Note を作る。読込失敗は None (呼び出し側で warning)。
 pub fn load_note(abs: &Path, rel: &Path) -> Option<Note> {
     let raw = read_utf8_sig(abs).ok()?;
     let text = raw.trim(); // 前後の空白/空行を除いてから frontmatter を判定する
@@ -516,6 +516,7 @@ pub fn scan_frontmatter_issue(path: &Path) -> Option<(String, String)> {
             return Some(("読込不可".to_string(), first));
         }
     };
+    let text = text.trim(); // load_note と同じく前後の空白/空行を除いてから判定する
     if !text.starts_with("---") {
         return None; // frontmatter 無しは破損ではない (タグ/要約欠落として health が拾う)
     }
@@ -528,7 +529,7 @@ pub fn scan_frontmatter_issue(path: &Path) -> Option<(String, String)> {
             ))
         }
     };
-    let m = match fm_delim_re().find_at(&text, first_nl + 1) {
+    let m = match fm_delim_re().find_at(text, first_nl + 1) {
         Some(m) => m,
         None => {
             return Some((
