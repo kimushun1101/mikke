@@ -2141,6 +2141,41 @@ fn semantic_slim_json_errors_without_stdout() {
     );
 }
 
+/// chunking 版の無い旧 metadata はモデルをロードせず明示エラーにし、再構築を案内する。
+#[cfg(feature = "semantic")]
+#[test]
+fn semantic_old_embedding_format_prompts_rebuild() {
+    let root = temp_repo(
+        "sem-old-format",
+        &[
+            ("mikke.toml", "[semantic]\nenabled = true\n"),
+            ("a.md", "# A\n\nメモ。\n"),
+        ],
+    );
+    let embeddings = root.join(".mikke/embeddings");
+    fs::create_dir_all(&embeddings).unwrap();
+    fs::write(embeddings.join("embeddings.safetensors"), b"old").unwrap();
+    fs::write(
+        embeddings.join("metadata.json"),
+        r#"{"model":"model","notes":[{"path":"a.md","title":"A","hash":"hash"}]}"#,
+    )
+    .unwrap();
+
+    let out = run_raw(&root, &["semantic", "query"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = fs::remove_dir_all(&root);
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "旧形式は exit 2 のはず:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("保存形式が古い") && stderr.contains("mikke embed"),
+        "旧形式の再構築案内が無い:\n{stderr}"
+    );
+}
+
 /// embed → semantic → hybrid → 差分更新 → 削除 → prefix 変更 の一連 e2e。
 /// モデル取得が必要 (HF cache かネットワーク) なため既定では走らせない:
 ///   cargo test --features semantic -- --ignored

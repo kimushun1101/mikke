@@ -155,7 +155,7 @@ stale 判定は次のいずれか: (a) いずれかの md の mtime が `meta['g
 - **LIKE の比べ方**(tag / title / find の LIKE フォールバック): 列とキーワードの両方を Rust の `to_lowercase` で小文字にして比べる(`mikke_lower` は検索の接続に登録する関数。SQLite の `LOWER` は ASCII しか変えないため使わない)。ASCII 以外の大文字小文字(`Ä` と `ä`)も同一視し、MATCH 経路と揃う。全角と半角は、小文字化の前の幅の畳み込みで同一視する。キーワードの `%` `_` `\` は `ESCAPE '\'` で逃がし、ワイルドカードでなく文字そのものに当てる。
 - **recent**: 並びのキーが空でないノートを、キーの降順(同じキーは path 昇順)で LIMIT。
 - **list-tags**: `GROUP BY tag ORDER BY COUNT(*) DESC, tag`。
-- **semantic**: クエリを `query_prefix + query` で encode(normalize)、保存ベクトルとの内積(= 正規化済 cosine)で降順 top_n。**モデル/prefix は保存 metadata を優先**(生成時とエンコード条件を揃える)。
+- **semantic**: クエリを `query_prefix + query` で encode(normalize)、保存ベクトルとの内積(= 正規化済 cosine)を計算し、長いノートは全 token 窓の最大値をノートの score として降順 top_n。返り値はノート単位。**モデル/prefix は保存 metadata を優先**(生成時とエンコード条件を揃える)。
 - **hybrid (RRF)**: 各ストリームから `top_n * candidate_factor` 取得 → rank を 1 始まりで付与 → `score += weight * 1/(rrf_k + rank)`。semantic 未構築時は vector 重み 0 で**再正規化**し BM25 のみへ degrade(`semantic.enabled` が true なら Note を stderr へ)。結果に `via`(bm25 / vec / bm25+vec)と score を表示。
 
 ## リンクグラフ(links / backlinks)
@@ -214,10 +214,11 @@ score/via は semantic/hybrid のみ。**summary 欠落を空白で黙らせな�
 
 バックエンドは candle(純 Rust — 単一バイナリの配布を壊さない)。
 
-- 埋め込みテキスト = `title\n summary\n 本文`。E5 系仕様で**ドキュメント側に passage_prefix、クエリ側に query_prefix**。normalize して保存。
-- 差分検出はファイル内容の SHA-256。model/passage_prefix 変更時は全再構築(既存ベクトルと混ぜると比較不能)。削除ノートは metadata から除外し、**削除のみの更新でも保存し直す**(消えたベクトルが結果に残り続けるのを防ぐ)。
-- 新規/更新分は一定件数ごとに保存する。途中で中断しても、次回の `mikke embed` (`--force` なし) は保存済みの分を再利用して残りから続行する。
-- 保存: `embeddings.safetensors`(vectors 行列)+ `metadata.json`(generated, model, query_prefix, passage_prefix, note_count, notes[{path,title,hash}])。順序 = vectors 行と一致。
+- 埋め込みテキスト = `title\n summary\n 本文`。E5 系仕様で**ドキュメント側に passage_prefix、クエリ側に query_prefix**。normalize して保存。`passage_prefix + 埋め込みテキスト` がモデルの token 上限内なら従来どおり 1 テキストのままにする。
+- 上限を超えるノートは、truncation なしで tokenize した offsets を使って summary + 本文を 384 token 幅の窓へ分ける。隣接窓は 64 token overlap とし、各窓を `passage_prefix + title + "\n" + 窓本文` として上限内に収める (title が長い時は窓を縮め、overlap の 2 倍も取れなければ窓に分けず上限で切り詰めた 1 テキストにして Warning を出す)。semantic のノート score は全窓の cosine 類似度の最大値で、検索結果はノート単位。
+- 差分検出はファイル内容の SHA-256。model/passage_prefix または chunk 保存方式の版が変わった時は全再構築(既存ベクトルと混ぜると比較不能)。削除ノートは metadata から除外し、**削除のみの更新でも保存し直す**(消えたベクトルが結果に残り続けるのを防ぐ)。chunk 形式導入前の metadata は初回の `mikke embed` で全件作り直す。
+- 新規/更新分は一定の窓数 (256) に達したノートの切れ目ごとに保存する。1 ノートの全窓を同じ snapshot に入れ、途中で中断しても、次回の `mikke embed` (`--force` なし) は保存済みノートの全窓を再利用して残りから続行する。更新ノートを再計算するまでは旧 hash・旧 chunks・旧窓ベクトルを維持する。
+- 保存: `embeddings.safetensors`(vectors 行列。窓ごとに 1 行)+ `metadata.json`(generated, model, query_prefix, passage_prefix, chunking, note_count, notes[{path,title,hash,chunks}])。順序 = ノート順、ノート内は窓順。vectors 行数は `chunks` の合計と一致させる。
 - 初回はモデルを HF から cache へ DL する(オフライン/社内網の考慮を README に)。
 - semantic feature 無しビルド・バックエンド未実装の経路は silent 劣化させず、明示エラーで exit する(exit 2 — 「exit code」参照)。
 

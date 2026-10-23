@@ -86,9 +86,11 @@ mikke hybrid 発振 対策      # BM25 と semantic の RRF 融合
 ```
 
 - モデルは既定で `intfloat/multilingual-e5-small` (`mikke.toml` の `[semantic] model` で変更可。BERT 系アーキテクチャのみ対応)
+- 長いノートは token 数で overlap 付きの窓に分けて埋め込み、semantic では全窓の最大類似度をそのノートの score にする。結果は従来どおりノート単位
 - **初回の `embed`/`semantic` 実行時にモデルを Hugging Face から自動ダウンロード**する (約 470MB → `~/.cache/huggingface/`)。以降はオフラインで動く
 - **オフライン / 社内網**: ダウンロードには huggingface.co への HTTPS 直接続が必要。proxy 等で取得できない場合は、取得済みマシンの `~/.cache/huggingface/hub/models--intfloat--multilingual-e5-small/` をそのままコピーすれば動く
-- 差分検出はファイル内容の SHA-256。計算結果は途中でも一定件数ごとに保存され、中断後の `mikke embed` は保存済みの続きから再開する。モデルや prefix を変えた場合は自動で全再構築する
+- 差分検出はファイル内容の SHA-256。計算結果は途中でも一定の窓数ごとに (ノートの切れ目で) 保存され、中断後の `mikke embed` は保存済みノートの全窓を再利用して続きから再開する。モデルや prefix を変えた場合は自動で全再構築する
+- chunk 保存形式の導入前に作った埋め込みは互換性がないため、更新後の初回 `mikke embed` で全件を自動的に作り直す
 
 ## AI エージェントから使う
 
