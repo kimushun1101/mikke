@@ -1,2 +1,2 @@
-{"type":"meta","command":"find","count":1,"order":"approx","capped":false}
+{"type":"meta","command":"find","count":1,"match":"all","order":"approx","capped":false}
 {"path":"notes/short.md","title":"短い","date":"2026-06-01","updated":"","tags":["misc"],"summary":""}

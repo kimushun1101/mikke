@@ -1,9 +1,9 @@
 //! 検索コマンド群 (find / tag / title / semantic / hybrid / list-tags / recent / links / backlinks)。
 //!
-//! FTS 変換 (fts_query): 空白で語分割 → 各語を個別に `"..."` quote (内部 " は "") → AND 連結。
-//! find のクエリは AND 意味論と MATCH/LIKE 経路を保つため空白を正規化せず、幅の畳み込み (fold_width) だけをかける。
+//! FTS 変換 (fts_query): 空白で語分割 → 各語を個別に `"..."` quote (内部 " は "") → AND/OR 連結。
+//! find のクエリは MATCH/LIKE 経路を保つため空白を正規化せず、幅の畳み込み (fold_width) だけをかける。
 //! trigram 制約: 各語 3 文字以上なら `ORDER BY rank` (FTS5 BM25)。1 語でも <3 文字を含めば
-//!   LIKE フォールバック (全語 AND で mikke_lower(content/title) LIKE %term% で絞り、簡易スコア順)。
+//!   LIKE フォールバック (各語の条件を AND/OR で結び、簡易スコア順)。
 //! find の見出し: 順序を正直に表示。bm25_limit 到達時は打ち切りを明示。
 //! tag/title: 検索列と keyword を正規化した mikke_lower(...) LIKE %kw% 部分一致、SORT_KEY 降順。
 //! LIKE の小文字化は列・keyword とも Rust の to_lowercase (SQLite の LOWER は ASCII だけ)。
@@ -51,6 +51,10 @@ struct Meta {
     r#type: &'static str,
     command: &'static str,
     count: usize,
+    /// find / hybrid のみ: "all" (全語 AND) | "any" (いずれか OR)。
+    /// hybrid では BM25 ストリームの結合方法。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    r#match: Option<&'static str>,
     /// find / hybrid のみ: "relevance" (BM25 順) | "approx" (短語 fallback の簡易スコア順)。
     /// hybrid では BM25 ストリームの順序。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,6 +74,7 @@ impl Meta {
             r#type: "meta",
             command,
             count,
+            r#match: None,
             order: None,
             capped: None,
             degraded: None,
@@ -380,19 +385,55 @@ fn split_terms(keyword: &str) -> Vec<&str> {
     }
 }
 
+/// 複数語をすべて含む (AND) か、いずれかを含む (OR) か。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MatchMode {
+    All,
+    Any,
+}
+
+impl MatchMode {
+    fn from_any(any: bool) -> Self {
+        if any {
+            Self::Any
+        } else {
+            Self::All
+        }
+    }
+
+    fn sql_joiner(self) -> &'static str {
+        match self {
+            Self::All => " AND ",
+            Self::Any => " OR ",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Any => "any",
+        }
+    }
+}
+
 /// FTS5 trigram 用にキーワードを MATCH 式へ変換する。
 /// 入力全体を 1 つの quote で囲むと連続一致要求で 0 件化するため語ごと quote が必須。
-fn fts_query(keyword: &str) -> String {
+fn fts_query(keyword: &str, match_mode: MatchMode) -> String {
     split_terms(keyword)
         .iter()
         .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
         .collect::<Vec<_>>()
-        .join(" AND ")
+        .join(match_mode.sql_joiner())
 }
 
 /// FTS5 全文検索の path を BM25 relevance 順 (best-first) で返す。
 /// 短語 (<3 文字) を 1 語でも含めば LIKE フォールバック。判定は語ごと。
-fn bm25_ranked_paths(conn: &Connection, keyword: &str, limit: i64) -> Vec<String> {
+fn bm25_ranked_paths(
+    conn: &Connection,
+    keyword: &str,
+    limit: i64,
+    match_mode: MatchMode,
+) -> Vec<String> {
     let terms = split_terms(keyword);
     if is_match_path(keyword) {
         // FTS5 の特殊カラム `rank` = BM25 (重みデフォルト)。昇順で関連度が高い順。
@@ -400,13 +441,13 @@ fn bm25_ranked_paths(conn: &Connection, keyword: &str, limit: i64) -> Vec<String
             .prepare("SELECT path FROM notes_fts WHERE notes_fts MATCH ?1 ORDER BY rank LIMIT ?2")
             .expect("FTS SELECT の準備に失敗");
         let rows = stmt
-            .query_map(params![fts_query(keyword), limit], |r| {
+            .query_map(params![fts_query(keyword, match_mode), limit], |r| {
                 r.get::<_, String>(0)
             })
             .expect("FTS SELECT に失敗");
         rows.flatten().collect()
     } else {
-        // trigram で拾えない短語 (<3 文字) を含む。全語 AND の LIKE フォールバック。
+        // trigram で拾えない短語 (<3 文字) を含む。AND/OR を保った LIKE フォールバック。
         let mut clauses: Vec<&str> = Vec::new();
         let mut like_params: Vec<String> = Vec::new();
         for t in &terms {
@@ -422,7 +463,7 @@ fn bm25_ranked_paths(conn: &Connection, keyword: &str, limit: i64) -> Vec<String
             "SELECT n.path, mikke_lower(f.title), mikke_lower(f.content), {SORT_KEY}
              FROM notes_fts f JOIN notes n ON f.path = n.path
              WHERE {}",
-            clauses.join(" AND ")
+            clauses.join(match_mode.sql_joiner())
         );
         let mut stmt = conn.prepare(&sql).expect("LIKE SELECT の準備に失敗");
         let rows = stmt
@@ -448,8 +489,7 @@ struct LikeCandidate {
     key: String,
 }
 
-/// 簡易スコアの定数。BM25 の tf の飽和と文書長の正規化だけを取り、idf は使わない
-/// (全候補が全語を含むので、候補の中では idf が同じになる)。
+/// 簡易スコアの定数。BM25 の tf の飽和と文書長の正規化だけを取り、AND/OR とも idf は使わない。
 const LIKE_K1: f64 = 1.2;
 const LIKE_B: f64 = 0.75;
 /// title に語を含む時の加点 (語ごと)。
@@ -512,15 +552,16 @@ fn is_match_path(keyword: &str) -> bool {
     split_terms(keyword).iter().all(|t| t.chars().count() >= 3)
 }
 
-pub fn cmd_find(cfg: &Config, words: &[String], top: Option<u64>, json: bool) -> usize {
-    // 複数語は全語結合 (無クォートの複数語でも語落ちしない)。
+pub fn cmd_find(cfg: &Config, words: &[String], top: Option<u64>, json: bool, any: bool) -> usize {
+    // 無クォートの複数語でも語落ちさせず、既定は全語、--any はいずれかで結合する。
     let keyword = words.join(" ");
+    let match_mode = MatchMode::from_any(any);
     // 検索には幅を畳んだ語を使い (語長の判定も畳んだ後)、見出しには打った語を出す
     let folded = fold_width(&keyword);
     let conn = connect(cfg);
     // --top は bm25_limit の代わり (bm25_limit は既定値であって天井ではない)
     let limit = top.map_or(cfg.bm25_limit, |n| n as i64);
-    let paths = bm25_ranked_paths(&conn, &folded, limit);
+    let paths = bm25_ranked_paths(&conn, &folded, limit, match_mode);
     let notes = fetch_notes(&conn, &paths);
     // 短語 (<3字) を含むと trigram 不可で LIKE フォールバック (簡易スコア順)。順序の正体を正直に出す。
     let relevance = is_match_path(&folded);
@@ -528,6 +569,7 @@ pub fn cmd_find(cfg: &Config, words: &[String], top: Option<u64>, json: bool) ->
     let capped = notes.len() as i64 >= limit;
     if json {
         let mut meta = Meta::new("find", notes.len());
+        meta.r#match = Some(match_mode.name());
         meta.order = Some(bm25_order(relevance));
         meta.capped = Some(capped);
         print_json(&meta);
@@ -537,9 +579,14 @@ pub fn cmd_find(cfg: &Config, words: &[String], top: Option<u64>, json: bool) ->
         } else {
             "簡易スコア順 (短語を含み BM25 算出不可)"
         };
+        let match_note = if match_mode == MatchMode::Any {
+            ", いずれかを含む (OR)"
+        } else {
+            ""
+        };
         let capped_str = capped_note(capped, limit);
         println!(
-            "全文検索 '{keyword}' の結果 ({}件, {order}){capped_str}:\n",
+            "全文検索 '{keyword}' の結果 ({}件, {order}{match_note}){capped_str}:\n",
             notes.len()
         );
     }
@@ -807,13 +854,14 @@ fn semantic_stream(cfg: &Config, query: &str, depth: usize) -> Option<Vec<String
 }
 
 /// BM25 (キーワード) と semantic (意味) を RRF 融合するハイブリッド検索。
-pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize, json: bool) -> usize {
+pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize, json: bool, any: bool) -> usize {
     let candidate_depth = top as i64 * cfg.candidate_factor; // 各ストリームから多めに取って融合する
     let conn = connect(cfg);
+    let match_mode = MatchMode::from_any(any);
 
     // --- ストリーム 1: BM25 (幅を畳んだ語で引く。semantic には原文を渡す) ---
     let folded = fold_width(query);
-    let bm25_paths = bm25_ranked_paths(&conn, &folded, candidate_depth);
+    let bm25_paths = bm25_ranked_paths(&conn, &folded, candidate_depth, match_mode);
     let bm25_rank: HashMap<&str, i64> = bm25_paths
         .iter()
         .enumerate()
@@ -886,6 +934,7 @@ pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize, json: bool) -> usize {
     let relevance = is_match_path(&folded);
     if json {
         let mut meta = Meta::new("hybrid", notes.len());
+        meta.r#match = Some(match_mode.name());
         meta.order = Some(bm25_order(relevance));
         meta.degraded = Some(!has_vector);
         print_json(&meta);
@@ -901,7 +950,12 @@ pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize, json: bool) -> usize {
         } else {
             ", BM25 は簡易スコア順 (短語を含む)"
         };
-        println!("ハイブリッド検索 '{query}' の結果 (上位{top}件, {mode}{approx}):\n");
+        let match_note = if match_mode == MatchMode::Any {
+            ", BM25 はいずれかを含む (OR)"
+        } else {
+            ""
+        };
+        println!("ハイブリッド検索 '{query}' の結果 (上位{top}件, {mode}{approx}{match_note}):\n");
     }
     print_notes(&notes, json);
     notes.len()

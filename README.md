@@ -43,6 +43,7 @@ cargo install --git https://github.com/kimushun1101/mikke --locked
 cd <ノートフォルダ>
 mikke index               # index 生成 (初回は検索時に自動生成される)
 mikke find 検索 語        # 全文検索 (BM25 順)
+mikke find 言い換え 表記ゆれ --any # いずれかを含むノートを検索 (OR。既定は AND)
 mikke find 検索 --top 5   # 件数を絞る (find / tag / title)
 mikke tag タグ名         # タグ検索
 mikke title キーワード     # タイトル検索
@@ -54,9 +55,12 @@ mikke health              # 健全性チェック
 mikke embed               # 埋め込み生成 (semantic feature 必須)
 mikke semantic クエリ      # 意味検索
 mikke hybrid クエリ        # BM25 + semantic の RRF 融合
+mikke hybrid 言い換え 表記ゆれ --any # BM25 側を OR 検索
 ```
 
 検索系コマンド (find / tag / title / semantic / hybrid / recent) と `list-tags` は `--json` で JSON Lines (1 行目メタ行 + 1 件 1 行) を stdout に出力する。jq やスクリプトから安全にパースでき、exit code は変わらない。スキーマは [docs/SPEC.md](docs/SPEC.md) の「出力フォーマット」。
+
+`find` と `hybrid` の複数語は既定で全語を含むノートに絞る (AND)。言い換え・表記ゆれを並べて、いずれかを含むノートを 1 回で引くには `--any` (OR) を使う。`hybrid --any` では BM25 ストリームだけが OR になり、semantic には原文クエリを渡す。
 
 ルートは `--root PATH` 明示指定 → 環境変数 `MIKKE_ROOT` → cwd からの `mikke.toml` (設定を隠したい場合は `.mikke.toml`) 上方探索 → git root の順で決める。git 管理でないフォルダも、`mikke.toml` を置くか `--root` を指定すればそのまま対象にできる。
 

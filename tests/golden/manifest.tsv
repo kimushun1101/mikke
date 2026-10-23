@@ -3,6 +3,8 @@ backlinks_short	backlinks notes/short.md
 backlinks_zero	backlinks nested/notes/zebra-guide.md
 find_bm25	find slam
 find_bm25_json	find slam --json
+find_any_match	find slam 制御周期 --any
+find_any_short	find 短い 制御 --any
 find_like_fallback	find robotics 制御
 find_nested	find zebra
 find_short	find 短い

@@ -463,6 +463,68 @@ fn json_meta(root: &Path, args: &[&str]) -> serde_json::Value {
         .unwrap_or_else(|e| panic!("{args:?} のメタ行を読めない ({e}):\n{stdout}"))
 }
 
+/// --any は MATCH / 短語 LIKE の両経路と hybrid の BM25 ストリームを OR にする。
+/// JSON メタ行と help にも結合方法を明示する。
+#[test]
+fn any_matches_either_term_and_is_described() {
+    let root = temp_copy("any");
+    run(&root, &["index"]);
+    let expected = vec![
+        "notes/robotics-control.md".to_string(),
+        "notes/robotics-slam.md".to_string(),
+    ];
+
+    assert!(hit_paths(&root, &["find", "slam", "制御周期"]).is_empty());
+    assert_eq!(
+        hit_paths(&root, &["find", "slam", "制御周期", "--any"]),
+        expected
+    );
+    assert_eq!(
+        hit_paths(&root, &["find", "短い", "制御", "--any"]),
+        vec![
+            "notes/robotics-control.md".to_string(),
+            "notes/short.md".to_string()
+        ]
+    );
+    assert_eq!(
+        hit_paths(
+            &root,
+            &["hybrid", "slam", "制御周期", "--any", "--top", "5"]
+        ),
+        expected
+    );
+
+    let meta = json_meta(&root, &["find", "slam", "制御周期", "--json"]);
+    assert_eq!(meta["match"], "all");
+    let meta = json_meta(
+        &root,
+        &[
+            "hybrid",
+            "slam",
+            "制御周期",
+            "--any",
+            "--top",
+            "5",
+            "--json",
+        ],
+    );
+    assert_eq!(meta["match"], "any");
+
+    for command in ["find", "hybrid"] {
+        let out = Command::new(bin())
+            .args([command, "--help"])
+            .output()
+            .expect("failed to run mikke --help");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("既定は全語を含む (AND)、--any でいずれかを含む (OR)"),
+            "{command} --help:\n{stdout}"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// find / title / tag の `--top N` は件数を絞り、打ち切りを見出しとメタ行で示す (#73)。
 #[test]
 fn top_limits_find_title_tag() {
