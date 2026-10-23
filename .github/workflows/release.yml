@@ -23,7 +23,7 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           # musl 完全静的バイナリ: glibc バージョン非依存で任意の distro で動く
-          # (esaxx_fast を外したので musl-tools の musl-gcc のみでビルド可能)
+          # (C++ 依存なし。mimalloc も純 C のため musl-tools の musl-gcc のみでビルド可能)
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
           - os: macos-latest
