@@ -88,7 +88,7 @@ mikke hybrid 発振 対策      # BM25 と semantic の RRF 融合
 - モデルは既定で `intfloat/multilingual-e5-small` (`mikke.toml` の `[semantic] model` で変更可。BERT 系アーキテクチャのみ対応)
 - **初回の `embed`/`semantic` 実行時にモデルを Hugging Face から自動ダウンロード**する (約 470MB)。cache は `HF_HUB_CACHE` → `$HF_HOME/hub` → `$XDG_CACHE_HOME/huggingface/hub` → 既定の `~/.cache/huggingface/hub` の優先順
 - **オフライン / 社内網**: 上記の cache へ取得済みの `models--intfloat--multilingual-e5-small/` をそのままコピーすれば動く。Hugging Face のミラーを使う場合は `HF_ENDPOINT` で指定できる
-- 差分検出はファイル内容の SHA-256。モデルや prefix を変えた場合は自動で全再構築する
+- 差分検出はファイル内容の SHA-256。計算結果は途中でも一定件数ごとに保存され、中断後の `mikke embed` は保存済みの続きから再開する。モデルや prefix を変えた場合は自動で全再構築する
 
 ## AI エージェントから使う
 
