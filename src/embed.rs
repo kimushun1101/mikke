@@ -20,12 +20,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 /// 1 バッチのテキスト数。attention は系列長の 2 乗でメモリを食うため控えめに
 /// (最悪 8 × 12head × 512² × 4B ≈ 400MB の一時領域)。
 const BATCH_SIZE: usize = 8;
+
+/// 埋め込みを永続化する単位。推論 32 バッチごとに中間結果を残す。
+const SAVE_CHUNK_SIZE: usize = BATCH_SIZE * 32;
 
 /// E5 系の系列長上限。モデル config の max_position_embeddings とこの値の小さい方で切る。
 const MAX_SEQ_LEN: usize = 512;
@@ -65,17 +68,51 @@ struct Encoder {
     device: Device,
 }
 
+fn hf_cache_dir(
+    hf_hub_cache: Option<&str>,
+    hf_home: Option<&str>,
+    xdg_cache_home: Option<&str>,
+) -> Option<PathBuf> {
+    if let Some(path) = hf_hub_cache.filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+    if let Some(path) = hf_home.filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(path).join("hub"));
+    }
+    xdg_cache_home
+        .filter(|value| !value.is_empty())
+        .map(|path| PathBuf::from(path).join("huggingface").join("hub"))
+}
+
 impl Encoder {
     /// HF Hub cache からモデル一式をロードする (cache に無いファイルのみダウンロード)。
     fn load(model_id: &str) -> Result<Encoder, String> {
         let device = Device::Cpu;
-        let api = hf_hub::api::sync::Api::new()
+        let hf_hub_cache = std::env::var("HF_HUB_CACHE").ok();
+        let hf_home = std::env::var("HF_HOME").ok();
+        let xdg_cache_home = std::env::var("XDG_CACHE_HOME").ok();
+        let cache_dir = hf_cache_dir(
+            hf_hub_cache.as_deref(),
+            hf_home.as_deref(),
+            xdg_cache_home.as_deref(),
+        );
+        // 場所を先に決めてから builder を作る。from_env は空の HF_HOME を cwd 相対の hub に
+        // してしまい、token もそこから読むため使わない (HF_ENDPOINT だけは同じく読む)
+        let cache = cache_dir.map_or_else(hf_hub::Cache::default, hf_hub::Cache::new);
+        let cache_location = cache.path().display().to_string();
+        let mut builder = hf_hub::api::sync::ApiBuilder::from_cache(cache);
+        if let Some(endpoint) = std::env::var("HF_ENDPOINT").ok().filter(|v| !v.is_empty()) {
+            builder = builder.with_endpoint(endpoint);
+        }
+        let api = builder
+            .build()
             .map_err(|e| format!("Hugging Face Hub API の初期化に失敗: {e}"))?;
         let repo = api.model(model_id.to_string());
         let fetch = |file: &str| {
             repo.get(file).map_err(|e| {
                 format!(
                     "モデル {model_id} の {file} を取得できません: {e}\n  \
+                     探した cache: {cache_location}\n  \
                      初回は Hugging Face からのダウンロードが必要です (オフライン/社内網は README 参照)。"
                 )
             })
@@ -128,8 +165,13 @@ impl Encoder {
         })
     }
 
-    /// texts を L2 正規化済み埋め込みへ (入力順を保持)。progress=true で stderr に進捗。
-    fn encode(&self, texts: &[String], progress: bool) -> Result<Vec<Vec<f32>>, String> {
+    /// texts を L2 正規化済み埋め込みへ (入力順を保持)。
+    /// progress = Some((それまでに終えた件数, 全体の件数)) で stderr に全体の進捗を出す (改行はしない)。
+    fn encode(
+        &self,
+        texts: &[String],
+        progress: Option<(usize, usize)>,
+    ) -> Result<Vec<Vec<f32>>, String> {
         // 長さの近いテキスト同士でバッチを組み padding の無駄を減らす (出力は元順に戻す)
         let mut order: Vec<usize> = (0..texts.len()).collect();
         order.sort_by_key(|&i| std::cmp::Reverse(texts[i].chars().count()));
@@ -149,13 +191,10 @@ impl Encoder {
                 out[i] = row;
             }
             done += chunk.len();
-            if progress {
-                eprint!("\r  {done}/{} 件", texts.len());
+            if let Some((before, total)) = progress {
+                eprint!("\r  {}/{total} 件", before + done);
                 let _ = std::io::stderr().flush();
             }
-        }
-        if progress && !texts.is_empty() {
-            eprintln!();
         }
         Ok(out)
     }
@@ -239,6 +278,45 @@ struct CollectedNote {
     hash: String,
 }
 
+struct EmbeddingSnapshot {
+    vectors: Vec<Vec<f32>>,
+    notes: Vec<MetaNote>,
+}
+
+/// 現在までの計算結果を notes 順に並べる。未計算の更新ノートを旧ベクトルで残す場合は、
+/// 次回も更新対象になるよう旧 hash を維持する。
+fn assemble_embedding_snapshot(
+    notes: &[CollectedNote],
+    new_embeddings: &HashMap<&str, Vec<f32>>,
+    old_embeddings: &HashMap<String, Vec<f32>>,
+    old_hashes: &HashMap<&str, &str>,
+) -> EmbeddingSnapshot {
+    let mut vectors = Vec::with_capacity(notes.len());
+    let mut meta_notes = Vec::with_capacity(notes.len());
+    for note in notes {
+        let (vector, hash) = if let Some(vector) = new_embeddings.get(note.path.as_str()) {
+            (vector, note.hash.as_str())
+        } else if let (Some(vector), Some(hash)) = (
+            old_embeddings.get(&note.path),
+            old_hashes.get(note.path.as_str()),
+        ) {
+            (vector, *hash)
+        } else {
+            continue;
+        };
+        vectors.push(vector.clone());
+        meta_notes.push(MetaNote {
+            path: note.path.clone(),
+            title: note.title.clone(),
+            hash: hash.to_string(),
+        });
+    }
+    EmbeddingSnapshot {
+        vectors,
+        notes: meta_notes,
+    }
+}
+
 /// ノートを収集し、埋め込みテキストとファイル内容 SHA-256 を組み立てる。
 fn collect_notes(cfg: &Config) -> Vec<CollectedNote> {
     let mut notes = Vec::new();
@@ -295,6 +373,49 @@ fn iso8601_utc(epoch_secs: u64) -> String {
         (secs % 3600) / 60,
         secs % 60
     )
+}
+
+/// 現在までの計算結果を vectors / metadata の両方へ保存する。
+fn save_embedding_snapshot(
+    cfg: &Config,
+    notes: &[CollectedNote],
+    new_embeddings: &HashMap<&str, Vec<f32>>,
+    old_embeddings: &HashMap<String, Vec<f32>>,
+    old_hashes: &HashMap<&str, &str>,
+) -> Result<(usize, usize), String> {
+    let snapshot = assemble_embedding_snapshot(notes, new_embeddings, old_embeddings, old_hashes);
+    let embeddings_file = cfg.embeddings_dir().join("embeddings.safetensors");
+    let metadata_file = cfg.embeddings_dir().join("metadata.json");
+
+    std::fs::create_dir_all(cfg.embeddings_dir())
+        .map_err(|e| format!("embeddings ディレクトリを作成できません: {e}"))?;
+    save_vectors(&embeddings_file, &snapshot.vectors)?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let metadata = Metadata {
+        generated: iso8601_utc(now),
+        model: Some(cfg.model.clone()),
+        query_prefix: Some(cfg.query_prefix.clone()),
+        passage_prefix: Some(cfg.passage_prefix.clone()),
+        note_count: snapshot.notes.len(),
+        notes: snapshot.notes,
+    };
+    let json = serde_json::to_string_pretty(&metadata)
+        .map_err(|e| format!("metadata の生成に失敗: {e}"))?;
+    // tmp + rename (書きかけの metadata が残るのを防ぐ。vectors と metadata の 2 ファイル間の
+    // 版ずれは、読み側の件数一致チェック → 全再構築で自己回復する)
+    let tmp = tmp_path(&metadata_file);
+    std::fs::write(&tmp, json)
+        .and_then(|_| std::fs::rename(&tmp, &metadata_file))
+        .map_err(|e| format!("metadata.json の保存に失敗: {e}"))?;
+
+    Ok((
+        metadata.note_count,
+        snapshot.vectors.first().map(|v| v.len()).unwrap_or(0),
+    ))
 }
 
 fn exit_err(msg: &str) -> ! {
@@ -406,72 +527,41 @@ fn build_embeddings(cfg: &Config, force: bool) {
 
     // 新規/更新分の埋め込み生成 (E5 仕様: ドキュメント側は passage_prefix 付き)
     let mut new_embed_map: HashMap<&str, Vec<f32>> = HashMap::new();
+    let mut saved_stats = None;
     if !to_embed.is_empty() {
         println!("モデルをロード中: {}", cfg.model);
         let encoder = Encoder::load(&cfg.model).unwrap_or_else(|e| exit_err(&e));
-        let texts: Vec<String> = to_embed
-            .iter()
-            .map(|n| format!("{}{}", cfg.passage_prefix, n.text))
-            .collect();
-        println!("埋め込みを計算中 ({}件)...", texts.len());
-        let vectors = encoder
-            .encode(&texts, true)
-            .unwrap_or_else(|e| exit_err(&e));
-        for (n, v) in to_embed.iter().zip(vectors) {
-            new_embed_map.insert(n.path.as_str(), v);
+        println!("埋め込みを計算中 ({}件)...", to_embed.len());
+        let mut done = 0usize;
+        for chunk in to_embed.chunks(SAVE_CHUNK_SIZE) {
+            let texts: Vec<String> = chunk
+                .iter()
+                .map(|n| format!("{}{}", cfg.passage_prefix, n.text))
+                .collect();
+            let vectors = encoder
+                .encode(&texts, Some((done, to_embed.len())))
+                .unwrap_or_else(|e| exit_err(&e));
+            for (note, vector) in chunk.iter().zip(vectors) {
+                new_embed_map.insert(note.path.as_str(), vector);
+            }
+            saved_stats = Some(
+                save_embedding_snapshot(cfg, &notes, &new_embed_map, &old_embeddings, &old_hashes)
+                    .unwrap_or_else(|e| exit_err(&e)),
+            );
+            done += chunk.len();
         }
+        eprintln!();
     }
 
-    // 全ノート分を notes 順に組み立て (metadata.notes と vectors の行順を一致させる)
-    let mut all_vectors: Vec<Vec<f32>> = Vec::with_capacity(notes.len());
-    let mut meta_notes: Vec<MetaNote> = Vec::with_capacity(notes.len());
-    for note in &notes {
-        let Some(vec) = new_embed_map
-            .remove(note.path.as_str())
-            .or_else(|| old_embeddings.remove(&note.path))
-        else {
-            continue; // 到達しない想定 (encode 失敗は上で exit 済み)
-        };
-        all_vectors.push(vec);
-        meta_notes.push(MetaNote {
-            path: note.path.clone(),
-            title: note.title.clone(),
-            hash: note.hash.clone(),
-        });
-    }
-
-    if let Err(e) = std::fs::create_dir_all(cfg.embeddings_dir()) {
-        exit_err(&format!("embeddings ディレクトリを作成できません: {e}"));
-    }
-    save_vectors(&embeddings_file, &all_vectors).unwrap_or_else(|e| exit_err(&e));
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let metadata = Metadata {
-        generated: iso8601_utc(now),
-        model: Some(cfg.model.clone()),
-        query_prefix: Some(cfg.query_prefix.clone()),
-        passage_prefix: Some(cfg.passage_prefix.clone()),
-        note_count: meta_notes.len(),
-        notes: meta_notes,
-    };
-    let json = serde_json::to_string_pretty(&metadata)
-        .unwrap_or_else(|e| exit_err(&format!("metadata の生成に失敗: {e}")));
-    // tmp + rename (書きかけの metadata が残るのを防ぐ。vectors と metadata の 2 ファイル間の
-    // 版ずれは、読み側の件数一致チェック → 全再構築で自己回復する)
-    let tmp = tmp_path(&metadata_file);
-    if let Err(e) = std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, &metadata_file)) {
-        exit_err(&format!("metadata.json の保存に失敗: {e}"));
-    }
+    // 削除のみの更新では計算 chunk が無いため、ここで最終状態を保存する。
+    let (note_count, vector_dim) = saved_stats.unwrap_or_else(|| {
+        save_embedding_snapshot(cfg, &notes, &new_embed_map, &old_embeddings, &old_hashes)
+            .unwrap_or_else(|e| exit_err(&e))
+    });
 
     println!("埋め込みを保存しました: {}", display_path(&embeddings_file));
-    println!("  ノート数: {}", metadata.note_count);
-    println!(
-        "  ベクトル次元: {}",
-        all_vectors.first().map(|v| v.len()).unwrap_or(0)
-    );
+    println!("  ノート数: {note_count}");
+    println!("  ベクトル次元: {vector_dim}");
 }
 
 /// semantic 検索の (path, cosine 類似度) を best-first で返す。
@@ -501,7 +591,7 @@ pub fn semantic_ranked(
     let query_prefix = meta.query_prefix.as_deref().unwrap_or(&cfg.query_prefix);
     let encoder = Encoder::load(model_id)?;
     let query_vec = encoder
-        .encode(&[format!("{query_prefix}{query}")], false)?
+        .encode(&[format!("{query_prefix}{query}")], None)?
         .pop()
         .ok_or("クエリの埋め込みに失敗")?;
     // 次元不一致 (破損・別モデルの残骸) は zip で黙って切り詰めず明示エラー
@@ -541,6 +631,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hf_cache_dir_priority() {
+        assert_eq!(
+            hf_cache_dir(Some("/hub-cache"), Some("/hf-home"), Some("/xdg-cache")),
+            Some(PathBuf::from("/hub-cache"))
+        );
+        assert_eq!(
+            hf_cache_dir(Some(""), Some("/hf-home"), Some("/xdg-cache")),
+            Some(PathBuf::from("/hf-home/hub"))
+        );
+        assert_eq!(
+            hf_cache_dir(None, Some(""), Some("/xdg-cache")),
+            Some(PathBuf::from("/xdg-cache/huggingface/hub"))
+        );
+        assert_eq!(hf_cache_dir(Some(""), Some(""), Some("")), None);
+    }
+
+    #[test]
     fn iso8601_epoch_zero() {
         assert_eq!(iso8601_utc(0), "1970-01-01T00:00:00Z");
     }
@@ -553,5 +660,50 @@ mod tests {
         assert_eq!(iso8601_utc(1_709_251_199), "2024-02-29T23:59:59Z");
         // 年初 (m <= 2 の分岐): 2025-01-01 00:00:00 = 1735689600
         assert_eq!(iso8601_utc(1_735_689_600), "2025-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn snapshot_keeps_old_hash_for_pending_updated_note() {
+        let notes = vec![
+            CollectedNote {
+                path: "computed.md".to_string(),
+                title: "computed".to_string(),
+                text: String::new(),
+                hash: "new-computed".to_string(),
+            },
+            CollectedNote {
+                path: "pending-updated.md".to_string(),
+                title: "pending updated".to_string(),
+                text: String::new(),
+                hash: "new-pending".to_string(),
+            },
+            CollectedNote {
+                path: "pending-new.md".to_string(),
+                title: "pending new".to_string(),
+                text: String::new(),
+                hash: "new-note".to_string(),
+            },
+        ];
+        let new_embeddings = HashMap::from([("computed.md", vec![1.0])]);
+        let old_embeddings = HashMap::from([
+            ("computed.md".to_string(), vec![9.0]),
+            ("pending-updated.md".to_string(), vec![2.0]),
+            ("deleted.md".to_string(), vec![3.0]),
+        ]);
+        let old_hashes = HashMap::from([
+            ("computed.md", "old-computed"),
+            ("pending-updated.md", "old-pending"),
+            ("deleted.md", "old-deleted"),
+        ]);
+
+        let snapshot =
+            assemble_embedding_snapshot(&notes, &new_embeddings, &old_embeddings, &old_hashes);
+
+        assert_eq!(snapshot.vectors, vec![vec![1.0], vec![2.0]]);
+        assert_eq!(snapshot.notes.len(), 2);
+        assert_eq!(snapshot.notes[0].path, "computed.md");
+        assert_eq!(snapshot.notes[0].hash, "new-computed");
+        assert_eq!(snapshot.notes[1].path, "pending-updated.md");
+        assert_eq!(snapshot.notes[1].hash, "old-pending");
     }
 }

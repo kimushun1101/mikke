@@ -916,6 +916,20 @@ fn golden_commands() {
     );
 }
 
+/// index 要約はネスト repo を一覧し、子の件数に孫ノートも含める。
+#[test]
+fn index_summary_lists_nested_repos() {
+    let root = temp_copy("nested-summary");
+    let (stdout, stderr) = run(&root, &["index"]);
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        stdout.ends_with(
+            "ネストしたノート repo: 2件\n  nested (mikke.toml): ノート 2件\n  nested/inner (.mikke.toml): ノート 1件\n"
+        ),
+        "ネスト repo の要約が想定と異なる:\n{stdout}\n{stderr}"
+    );
+}
+
 /// .mikke.toml がルートマーカー (上方探索) として効き、[scan] 設定も適用される。
 #[test]
 fn hidden_config_upward_search() {
@@ -1372,7 +1386,7 @@ fn old_index_format_rebuilds_before_title_search() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(format, "3");
+    assert_eq!(format, "4");
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -2745,6 +2759,73 @@ fn index_check_exit_codes() {
         Some(0),
         "--check 無しは破損があっても exit 0 のはず:\n{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// YAML エラーの frontmatter も全文を索引し、破損検出は維持する。
+#[test]
+fn invalid_frontmatter_yaml_is_searchable_and_fails_index_check() {
+    let root = temp_repo(
+        "invalid-frontmatter-yaml",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            (
+                "notes/broken.md",
+                "---\ntitle: 巣箱の掃除: 手順\n---\n\n本文の固有語はアオゲラ観察記録。\n",
+            ),
+            // 先頭の空行は load_note と同じく除いてから破損を判定する
+            (
+                "notes/leading-blank.md",
+                "\n\n---\ntitle: 巣箱の点検: 手順\n---\n\n本文の固有語はコゲラ観察記録。\n",
+            ),
+        ],
+    );
+    run(&root, &["index"]);
+
+    for (query, path) in [
+        ("アオゲラ観察記録", "notes/broken.md"),
+        ("巣箱の掃除", "notes/broken.md"),
+        ("コゲラ観察記録", "notes/leading-blank.md"),
+    ] {
+        let out = run_raw(&root, &["find", query]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "YAML エラーのノートを '{query}' で検索できない:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains(path),
+            "YAML エラーのノートが検索結果に無い:\n{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    let check = run_raw(&root, &["index", "--check"]);
+    let check_stderr = String::from_utf8_lossy(&check.stderr);
+    assert_eq!(
+        check.status.code(),
+        Some(1),
+        "YAML エラーを index --check が exit 1 にしていない:\n{check_stderr}"
+    );
+    assert!(
+        check_stderr.contains("frontmatter YAMLエラー"),
+        "YAML エラーの Warning が無い:\n{check_stderr}"
+    );
+    assert!(
+        check_stderr.contains("leading-blank.md"),
+        "先頭に空行がある YAML エラーの Warning が無い:\n{check_stderr}"
+    );
+
+    let health = run_raw(&root, &["health"]);
+    let health_stdout = String::from_utf8_lossy(&health.stdout);
+    assert!(
+        health.status.success()
+            && health_stdout.contains("frontmatter 破損")
+            && health_stdout.contains("YAMLエラー"),
+        "health が YAML エラーを報告していない:\n{health_stdout}"
     );
     let _ = fs::remove_dir_all(&root);
 }
