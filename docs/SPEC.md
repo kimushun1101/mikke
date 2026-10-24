@@ -10,7 +10,7 @@ mikke の挙動の正本。CLI 表面・設定キー・出力の意味は安定�
 |---|---|---|
 | `index` | `--check` | index 全再構築。`--check` は frontmatter 破損・tags 空要素があれば exit 1(CI 用) |
 | `embed` | `--force` | 埋め込み差分更新(`--force` で全件)。semantic feature 必須 |
-| `find` | `<検索語...> --any --top N --json` | 全文検索(FTS5 trigram, BM25 順。短語混在時は LIKE fallback/簡易スコア順)。既定は全語を含む (AND)、`--any` はいずれかを含む (OR)。`--top` 未指定は `bm25_limit` 件まで |
+| `find` | `<検索語...> --any --snippet --top N --json` | 全文検索(FTS5 trigram, BM25 順。短語混在時は LIKE fallback/簡易スコア順)。既定は全語を含む (AND)、`--any` はいずれかを含む (OR)。`--snippet` は当たり行を表示。`--top` 未指定は `bm25_limit` 件まで |
 | `tag` | `<タグ名> --top N --json` | タグ部分一致検索(date (空なら updated) 降順)。`--top` 未指定は全件 |
 | `title` | `<キーワード> --top N --json` | タイトル部分一致検索(date (空なら updated) 降順)。`--top` 未指定は全件 |
 | `semantic` | `<クエリ...> --top N(=5) --json` | 意味検索(cosine 類似度順) |
@@ -153,6 +153,7 @@ stale 判定は次のいずれか: (a) いずれかの md の mtime が `meta['g
 - **trigram 制約**: FTS5 trigram は各語 3 文字以上必須。**語ごとに**長さ判定し、1 語でも 3 文字未満を含む場合は LIKE フォールバック(`mikke_lower(content/title) LIKE %term%` の各語条件を既定は AND、`--any` は OR で結び、簡易スコア順)。全語 3 文字以上なら `ORDER BY rank`(FTS5 の BM25)。
 - **簡易スコア**(LIKE フォールバック): 全候補を読み、一致した語ごとに BM25 の tf の項(本文での出現回数の飽和と、候補の平均に対する本文長の正規化。k1 = 1.2、b = 0.75)を足し、title に語を含めば語ごとに 1 点を足す。AND / `--any` のどちらでも idf は使わない。スコア降順 → date (空なら updated) 降順 → path 昇順に並べてから上限で切る(date で並べてから切ると、古い本命が圏外に落ちるため)。
 - **find の順序表示**: BM25 順か「簡易スコア順(短語を含み BM25 算出不可)」かを**正直に出す**。上限(`--top`、未指定なら `bm25_limit`)到達時は「上位 N 件で打ち切り(全ヒット数不明)」と明示(打ち切りを全件数と誤読させない)。`--top` は `bm25_limit` より大きくてもよい(`bm25_limit` は既定値で天井ではない)。`--top` は 1 以上。
+- **find の `--snippet`**: opt-in で各ヒットの生ファイルを読み、BOM だけを除いた原文の行番号(1 始まり。frontmatter の行も数える)と内容を最大 3 行表示する。frontmatter の行は title / tags / summary の表示と重なるので当たり行にしない。当たり行が 3 行を超える時は、含む検索語の種類が多い行を優先し、同数なら前の行を取る。表示はファイル内の出現順。各行には索引と同じ検索用の形(幅の畳み込み + 和欧間スペースの削除)、空白分割した各検索語には `fold_width` をかけ、どちらにも Rust の `to_lowercase` をかけて、既定の AND / `--any` にかかわらず、いずれかの語を含む行を当たり行とする。長い行は正規化後の最左一致位置を中心に約 200 字へ切り出し、切った側へ `…` を付ける。一致位置が取れなければ行頭から切り出す。正規化前後の文字位置の対応表は持たないため、幅の畳み込みや空白の削除で窓の中心がずれることは許容する。`hybrid` / `semantic` / `tag` / `title` には適用しない。
 - **tag/title**: 正規化したキーワードによる `mikke_lower(...) LIKE %kw%` 部分一致、date (空なら updated) 降順、同じキーは path 昇順。`--top N` で N 件に打ち切る。N 件に達したら find と同じ打ち切りの注記を見出しに付ける。
 - **並びのキー**(tag / title / recent / backlinks と簡易スコアの同点): `date`、空なら `updated`(SQL では `COALESCE(NULLIF(date, ''), NULLIF(updated, ''), '')`)。date を書いたノートの並びは変わらず、date が空で updated のあるノートだけがその日付で並ぶ。どちらも空なら末尾。
 - **LIKE の比べ方**(tag / title / find の LIKE フォールバック): 列とキーワードの両方を Rust の `to_lowercase` で小文字にして比べる(`mikke_lower` は検索の接続に登録する関数。SQLite の `LOWER` は ASCII しか変えないため使わない)。ASCII 以外の大文字小文字(`Ä` と `ä`)も同一視し、MATCH 経路と揃う。全角と半角は、小文字化の前の幅の畳み込みで同一視する。キーワードの `%` `_` `\` は `ESCAPE '\'` で逃がし、ワイルドカードでなく文字そのものに当てる。
@@ -198,6 +199,7 @@ index の links テーブル(wikilink の生 target — 「ノートの解釈」
     path: <root 相対 path>
     tags: a, b, c
     summary: <summary>            # 空なら「(なし — 要約未設定。内容は path を開いて確認)」
+    <行番号>: <切り出した行>       # find --snippet のみ。0〜3 行
 ```
 
 score/via は semantic/hybrid のみ。**summary 欠落を空白で黙らせない**(本文未読の内容捏造を誘発するため明示)。
@@ -209,7 +211,7 @@ score/via は semantic/hybrid のみ。**summary 欠落を空白で黙らせな�
 **保証**: JSON モードの stdout には JSON Lines 以外を出さない。auto-build の告知・hybrid degrade の Note・Warning 類は従来どおり stderr のため、clone 直後の初回実行でも安全にパイプできる。
 
 - **メタ行(常に 1 行目)**: `{"type":"meta","command":"<サブコマンド名>","count":N}`。テキスト見出しが持つ情報を JSON でも失わないため、find は `"match"`(`"all"` = 全語 AND / `"any"` = いずれか OR)、`"order"`(`"relevance"` = BM25 順 / `"approx"` = 短語 fallback の簡易スコア順。v0.4.1 までは短語 fallback を date 降順に並べ `"date"` を出していた)、`"capped"`(上限 = `--top` か `bm25_limit` 到達 = true。ちょうど limit 件で打ち切りが無い場合も true になる保守的判定 — テキスト出力の打ち切り表示と同一条件。true のとき count を全ヒット数と誤読しない)を必ず含む。tag / title は `--top` を付けた時だけ `"capped"`(判定は find と同じ)を含む。hybrid は BM25 ストリームの結合方法を `"match"`、順序を find と同じ値の `"order"` で、`"degraded"`(semantic ストリームが使えず BM25 のみになった場合に true。埋め込み未構築のほか、構築済みでも semantic 検索の実行時失敗で true になる)を必ず含む。0 件時はメタ行のみ(hit 行 0 行)
-- **hit 行(2 行目以降、1 件 1 行)**: `{"path":"...","title":"...","date":"...","updated":"...","tags":["a","b"],"summary":"...","score":0.0123,"via":"bm25+vec"}`。`type` フィールドは付けない。score は semantic/hybrid のみ、via は hybrid のみ(semantic は via を設定しない)。updated と summary の空は `""` のまま(テキスト出力の sentinel 文は出さない — JSON では空文字列が欠落の明示になる)。score は f64 全精度で、テキスト出力の 4 桁丸めとは表記が異なる
+- **hit 行(2 行目以降、1 件 1 行)**: `{"path":"...","title":"...","date":"...","updated":"...","tags":["a","b"],"summary":"...","score":0.0123,"via":"bm25+vec"}`。`type` フィールドは付けない。score は semantic/hybrid のみ、via は hybrid のみ(semantic は via を設定しない)。`find --snippet` のときだけ `"matches":[{"line":<1 始まりの行番号>,"text":"<切り出した行>"}]` を加える(当たり行が無ければ空配列)。updated と summary の空は `""` のまま(テキスト出力の sentinel 文は出さない — JSON では空文字列が欠落の明示になる)。score は f64 全精度で、テキスト出力の 4 桁丸めとは表記が異なる
 - **list-tags**: メタ行(count = タグ数)+ `{"tag":"...","count":N}` を 1 タグ 1 行
 - **スキーマ安定性**: `--json` の出力も安定インターフェース。フィールド追加は互換、既存フィールドの改名・削除・意味変更は breaking
 

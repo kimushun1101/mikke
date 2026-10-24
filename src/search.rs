@@ -22,6 +22,7 @@
 use crate::config::Config;
 use crate::index;
 use crate::normalize::{fold_width, search_text};
+use crate::scan;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::{params, params_from_iter, Connection, OpenFlags};
 use std::collections::HashMap;
@@ -42,6 +43,16 @@ pub struct Hit {
     /// hybrid のみ (bm25 / vec / bm25+vec)。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
+    /// find --snippet のみ。生ファイルで検索語が当たった行。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matches: Option<Vec<LineMatch>>,
+}
+
+/// find --snippet で表示する当たり行 1 行。
+#[derive(serde::Serialize)]
+pub struct LineMatch {
+    pub line: usize,
+    pub text: String,
 }
 
 /// --json の 1 行目メタ行。テキスト見出しが持つ情報 (件数・順序種別・打ち切り・degrade) を
@@ -224,6 +235,7 @@ fn fetch_notes(conn: &Connection, paths: &[String]) -> Vec<Hit> {
             tags: tag_map.get(p).cloned().unwrap_or_default(),
             score: None,
             via: None,
+            matches: None,
         });
     }
     out
@@ -269,6 +281,11 @@ fn print_notes(notes: &[Hit], json: bool) {
             println!("    summary: (なし — 要約未設定。内容は path を開いて確認)");
         } else {
             println!("    summary: {}", note.summary);
+        }
+        if let Some(matches) = &note.matches {
+            for matched in matches {
+                println!("    {}: {}", matched.line, matched.text);
+            }
         }
         println!();
     }
@@ -552,7 +569,111 @@ fn is_match_path(keyword: &str) -> bool {
     split_terms(keyword).iter().all(|t| t.chars().count() >= 3)
 }
 
-pub fn cmd_find(cfg: &Config, words: &[String], top: Option<u64>, json: bool, any: bool) -> usize {
+const SNIPPET_MAX_MATCHES: usize = 3;
+const SNIPPET_MAX_CHARS: usize = 200;
+
+/// 長い当たり行を、正規化後の一致位置を中心に約 SNIPPET_MAX_CHARS 字へ切り出す。
+/// 正規化前後の文字位置は対応付けず、そのまま原文側の位置として使う。
+fn truncate_snippet(line: &str, matched: Option<(usize, usize)>) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() <= SNIPPET_MAX_CHARS {
+        return line.to_string();
+    }
+
+    let start = matched
+        .map(|(pos, len)| {
+            let center = pos.saturating_add(len / 2).min(chars.len());
+            center
+                .saturating_sub(SNIPPET_MAX_CHARS / 2)
+                .min(chars.len() - SNIPPET_MAX_CHARS)
+        })
+        .unwrap_or(0);
+    let end = start + SNIPPET_MAX_CHARS;
+    let mut text = String::new();
+    if start > 0 {
+        text.push('…');
+    }
+    text.extend(chars[start..end].iter());
+    if end < chars.len() {
+        text.push('…');
+    }
+    text
+}
+
+/// frontmatter が占める先頭の行数 (無い・閉じ `---` が無い時は 0)。
+/// 判定は load_note と同じく、先頭の空行を飛ばした最初の行が 3 個以上の `-` であること。
+fn frontmatter_line_count(lines: &[&str]) -> usize {
+    let Some(open) = lines.iter().position(|l| !l.trim().is_empty()) else {
+        return 0;
+    };
+    let first = lines[open].trim_end();
+    if first.len() < 3 || !first.chars().all(|c| c == '-') {
+        return 0;
+    }
+    lines[open + 1..]
+        .iter()
+        .position(|l| l.trim_end() == "---")
+        .map_or(0, |close| open + 1 + close + 1)
+}
+
+/// find のヒットを生ファイルで再確認し、検索語を含む本文の行を最大 3 行付ける。
+/// frontmatter の行は見出しの title / tags / summary と重なるので外す。含む語の種類が多い行を
+/// 優先して選び (AND では全語を含む行が答えの行になりやすい)、表示はファイル内の順にする。
+fn add_snippets(cfg: &Config, notes: &mut [Hit], keyword: &str) {
+    let terms: Vec<String> = split_terms(keyword)
+        .into_iter()
+        .map(|term| fold_width(term).to_lowercase())
+        .collect();
+
+    for note in notes {
+        let mut candidates = Vec::new();
+        let raw = scan::read_utf8_sig(&cfg.root.join(&note.path)).unwrap_or_default();
+        let lines: Vec<&str> = raw.lines().collect();
+        for (index, line) in lines
+            .iter()
+            .enumerate()
+            .skip(frontmatter_line_count(&lines))
+        {
+            // 索引と同じ正規化 (幅の畳み込み + 和欧間スペースの削除) で判定する。
+            // 削った空白の分だけ切り出しの中心がずれるのは許容する
+            let normalized = search_text(line).to_lowercase();
+            let hits: Vec<(usize, usize)> = terms
+                .iter()
+                .filter_map(|term| {
+                    normalized.find(term).map(|byte_pos| {
+                        (normalized[..byte_pos].chars().count(), term.chars().count())
+                    })
+                })
+                .collect();
+            if !hits.is_empty() {
+                let first = hits.iter().min_by_key(|(pos, _)| *pos).copied();
+                candidates.push((hits.len(), index, first));
+            }
+        }
+        // 含む語の種類が多い順 → 早い行の順で選び、ファイル内の順に戻す
+        candidates.sort_by_key(|&(count, index, _)| (std::cmp::Reverse(count), index));
+        candidates.truncate(SNIPPET_MAX_MATCHES);
+        candidates.sort_by_key(|&(_, index, _)| index);
+        note.matches = Some(
+            candidates
+                .into_iter()
+                .map(|(_, index, matched)| LineMatch {
+                    line: index + 1,
+                    text: truncate_snippet(lines[index], matched),
+                })
+                .collect(),
+        );
+    }
+}
+
+pub fn cmd_find(
+    cfg: &Config,
+    words: &[String],
+    top: Option<u64>,
+    json: bool,
+    any: bool,
+    snippet: bool,
+) -> usize {
     // 無クォートの複数語でも語落ちさせず、既定は全語、--any はいずれかで結合する。
     let keyword = words.join(" ");
     let match_mode = MatchMode::from_any(any);
@@ -562,7 +683,10 @@ pub fn cmd_find(cfg: &Config, words: &[String], top: Option<u64>, json: bool, an
     // --top は bm25_limit の代わり (bm25_limit は既定値であって天井ではない)
     let limit = top.map_or(cfg.bm25_limit, |n| n as i64);
     let paths = bm25_ranked_paths(&conn, &folded, limit, match_mode);
-    let notes = fetch_notes(&conn, &paths);
+    let mut notes = fetch_notes(&conn, &paths);
+    if snippet {
+        add_snippets(cfg, &mut notes, &keyword);
+    }
     // 短語 (<3字) を含むと trigram 不可で LIKE フォールバック (簡易スコア順)。順序の正体を正直に出す。
     let relevance = is_match_path(&folded);
     // 上限に達した場合は「全体がこの件数」と誤読されないよう打ち切りを明示する。
