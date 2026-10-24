@@ -88,7 +88,7 @@ disable = []                           # 項目単位で無効化するチェッ
 - 未知のキーをエラーにしないのは、新しい版で足したキーを書いた設定を古い版で読んでも止めないため。存在しない `include` / `exclude_paths` と root の外を指す `include` は警告しない(マシンによって無いフォルダや後から作るフォルダを書く使い方を壊さないため)
 - 同じ警告は 1 回の実行で 1 度だけ出す(ネスト repo の設定は 1 回の実行で何度か読み直すため)。実行のたびには出る(`auto_rebuild` の検索ごとにも出る)
 
-**常に除外**: 設定に関わらず `.git` と `.mikke` は走査対象外(`exclude_dirs` をデフォルト置換しても、ネスト repo の設定でも生きる)。index/embeddings の出力先は「そのパス配下」を**root 相対 prefix 一致**で除外する(ディレクトリ名一致だと同名ディレクトリが任意の深さで全消えする事故になるため)。**ディレクトリ symlink は辿らない**(ループ防止。ファイル symlink の `.md` は対象)。
+**常に除外**: 設定に関わらず `.git` と `.mikke` は走査対象外(`exclude_dirs` をデフォルト置換しても、ネスト repo の設定でも生きる)。`.` で始まるディレクトリや `.md` ファイルも走査し、ディレクトリで既定で外すのは `exclude_dirs` の既定名と `.git` / `.mikke` だけ。ツールが作る `.trash` や `.history` などは `exclude_paths` または `exclude_dirs` で外す。index/embeddings の出力先は「そのパス配下」を**root 相対 prefix 一致**で除外する(ディレクトリ名一致だと同名ディレクトリが任意の深さで全消えする事故になるため)。**ディレクトリ symlink は辿らない**(ループ防止。ファイル symlink の `.md` は対象)。
 **パスでの除外**: 名前一致の `exclude_dirs` / `exclude_files` は任意の深さに効く。1 か所だけを外すなら、root 相対の `exclude_paths` を使う。判定は要素単位で、`state` は `state/...` に当たり `statement/...` に当たらない。ディレクトリは入る前に外す。ファイルを指す値はそのファイルだけを外す(出力先の除外は今までどおり配下の `.md` ファイルにだけ当て、出力先の下のネスト repo は歩く)。include の起点が配下にあれば、起点も外す(除外は include に勝つ)。末尾の `/`、先頭の `./`、重複した `/`、途中の `.` は吸収する。大文字小文字は区別する。`exclude_dirs` の既定とは独立で、書いても既定は残る。
 **`.gitignore`**(`[scan] respect_gitignore`。既定 false で `.gitignore` を見ない): true の時は、root から上で最も近い `.git` を持つディレクトリから下の各 `.gitignore` と、その `.git/info/exclude` を git と同じ優先順で読む(深い `.gitignore` が勝ち、`info/exclude` が最も弱い。`!` の否定も効くが、除外されたディレクトリの中は否定で戻せない)。`.git` が見つからなければ root から下の `.gitignore` だけを読む(異常終了も警告もしない。コピーや展開で `.git` が無くなっても宣言は残るため)。root 自身と root より上は判定しない(上の `.gitignore` は root の下のパスにだけ当てる)。追跡済みのファイルでも、パターンに一致すれば外す(git の追跡状態は見ない。残すには `!path` を書く)。global excludes(`core.excludesFile`)・`.ignore` は読まない(索引の中身をマシンと利用者の設定に依存させないため)。大文字小文字はどの OS でも区別する(`core.ignorecase` は見ない)。`.git` を持つ下位のディレクトリ(ネストした git repo・submodule)では外側の規則を捨てて読み直し、その入口は外側の規則で判定する。`.git` がファイルの時は `info/exclude` を読まない。判定の順は、名前(`exclude_dirs` / `exclude_files`)→ パス(`exclude_paths`。ファイルは出力先も)→ `.gitignore` → ネスト境界。どれに当たっても結果は「外す」なので、順は性能にだけ効く。
 **`[index] path` の検査**: `.md` で終わる path は、大文字小文字を区別せず、ファイルの有無によらず設定エラーにする(走査は名前が `.md` で終わるファイルを拾うので、index がノートとして走査され、既存のノートを上書きするおそれがあるため)。既存のファイルは、mikke の index か作りかけの index と確かめられた時だけ作り直す。それ以外は消さずに exit 2 にし、path と理由を出す(判定は「index スキーマ」の自動再構築を参照)。root の外の絶対パスも使える(同じ検査で守る)。
@@ -103,8 +103,11 @@ disable = []                           # 項目単位で無効化するチェッ
 - ネスト repo の設定は `[scan]` と `[index]` だけを読む。`[health]` / `[search]` / `[semantic]` は読まない(型も未知のキーも検査しない。health の除外は最上位の `scan_skip_prefixes` / `quality_skip_prefixes` で指定する)。その repo を直接開けば最上位として全部を検査するので、親の実行で二重に報告しない
 - TOML の構文エラーと `[scan]` / `[index]` の型エラー・不正な値は、path 付きで即エラー終了する(silent に親規則で走査しない)。未知の節と `[scan]` / `[index]` の未知のキー・効かない値は、子の path で警告する
 
+`mikke index` の要約には、委譲したネスト repo とそれぞれのノート数を一覧表示する。子 repo の件数には配下の孫 repo のノートも含め、孫 repo も独立した行で表示する。
+
 ## ノートの解釈
 
+- **破損 frontmatter**: YAML として読めない frontmatter は、閉じ `---` 欠落と同じく metadata 空・frontmatter の生の行を含む全文を本文として扱う。
 - **title 抽出優先順**: frontmatter `title` → 最初の `# ` 見出し → ファイル名 stem。
 - **tags**: YAML sequence の null / 空文字列要素は登録しない。特に `- #Dog` は YAML ではコメントだけの null 要素であり、`Dog` へ復元しない (`- Dog` が修正例)。`- "#Dog"` は有効な文字列としてそのまま登録する。有効な重複タグは最初の出現を残して重複除去する (tags を文字列で書いた場合の 1 文字分解 quirk にも同じ重複除去を適用)。出現順は登録するタグ集合の決定にのみ効き、検索出力のタグ表示は従来どおりタグ名順。空要素は通常の `index` で path 付き警告、`health` で修正対象として報告し、`index --check` は構築完了後に exit 1 とする。
 - **date 正規化**: date/updated は `YYYY-MM-DD` 文字列へ。YAML が date 型で解釈した場合も文字列化して揃える。
@@ -141,7 +144,7 @@ index が無い場合は検索時に自動 build(clone 直後フォールバッ�
 
 `health` は、無ければ作り、作りかけ・表の欠けた・mikke の index でない・読めない index は exit 2 にする。形式違いと generated 無しは作り直さず、鮮度判定も通らない(再構築すると index 鮮度診断がマスクされるため)。`mikke index` は、mikke の index でない・読めないファイルは exit 2 にし、それ以外(作りかけを含む)は告知なしで作り直す。作り直す前にロックを取って判定し直すので、並行した検索でも作り直しは 1 回で、告知も 1 本になる。
 
-stale 判定は次のいずれか: (a) いずれかの md の mtime が `meta['generated']` より新しい、(b) 走査 path 集合の SHA-256 が `meta['scanned_paths_sha256']` と不一致(mtime が保存される移動・リネームや追加・削除も検知)、(c) path 集合の meta キーが無い index。`.gitignore` の編集や `exclude_paths` / `respect_gitignore` の変更で走査対象が変わった時も、走査 path 集合のハッシュで検知する。走査 md 件数と notes 行数の比較は行わない(frontmatter 破損で index から除外されるファイルがあると恒常 stale 化するため、スナップショットは破損分も含む走査 path 全体で取る)。対象は BM25 index のみで embeddings は対象外(semantic 側の鮮度は `mikke embed` の差分更新に委ねる)。限界と副作用: mtime を保存する copy(rsync -t 等)による内容変更は検知できない。有効時は検索のたびに全 md 走査 + metadata 取得のコストがかかり、ネスト repo の設定が壊れている場合は検索コマンド自体が path 付きで即エラー終了するようになる(fail-loud 方針と整合)。
+stale 判定は次のいずれか: (a) いずれかの md の mtime が `meta['generated']` より新しい、(b) 走査 path 集合の SHA-256 が `meta['scanned_paths_sha256']` と不一致(mtime が保存される移動・リネームや追加・削除も検知)、(c) path 集合の meta キーが無い index。`.gitignore` の編集や `exclude_paths` / `respect_gitignore` の変更で走査対象が変わった時も、走査 path 集合のハッシュで検知する。走査 md 件数と notes 行数の比較は行わない(読込不可で index から除外されるファイルがあると恒常 stale 化するため、スナップショットは読込不可分も含む走査 path 全体で取る)。対象は BM25 index のみで embeddings は対象外(semantic 側の鮮度は `mikke embed` の差分更新に委ねる)。限界と副作用: mtime を保存する copy(rsync -t 等)による内容変更は検知できない。有効時は検索のたびに全 md 走査 + metadata 取得のコストがかかり、ネスト repo の設定が壊れている場合は検索コマンド自体が path 付きで即エラー終了するようになる(fail-loud 方針と整合)。
 
 ## 検索セマンティクス
 
@@ -219,7 +222,7 @@ score/via は semantic/hybrid のみ。**summary 欠落を空白で黙らせな�
 - 差分検出はファイル内容の SHA-256。model/passage_prefix または chunk 保存方式の版が変わった時は全再構築(既存ベクトルと混ぜると比較不能)。削除ノートは metadata から除外し、**削除のみの更新でも保存し直す**(消えたベクトルが結果に残り続けるのを防ぐ)。chunk 形式導入前の metadata は初回の `mikke embed` で全件作り直す。
 - 新規/更新分は一定の窓数 (256) に達したノートの切れ目ごとに保存する。1 ノートの全窓を同じ snapshot に入れ、途中で中断しても、次回の `mikke embed` (`--force` なし) は保存済みノートの全窓を再利用して残りから続行する。更新ノートを再計算するまでは旧 hash・旧 chunks・旧窓ベクトルを維持する。
 - 保存: `embeddings.safetensors`(vectors 行列。窓ごとに 1 行)+ `metadata.json`(generated, model, query_prefix, passage_prefix, chunking, note_count, notes[{path,title,hash,chunks}])。順序 = ノート順、ノート内は窓順。vectors 行数は `chunks` の合計と一致させる。
-- 初回はモデルを HF から cache へ DL する(オフライン/社内網の考慮を README に)。
+- 初回はモデルを HF から cache へ DL する。cache の優先順は `HF_HUB_CACHE` → `$HF_HOME/hub` → `$XDG_CACHE_HOME/huggingface/hub` → 既定の `~/.cache/huggingface/hub`(空の値は未指定として扱う)。`HF_ENDPOINT` でミラーを指定できる(オフライン/社内網の導入手順は README に)。
 - semantic feature 無しビルド・バックエンド未実装の経路は silent 劣化させず、明示エラーで exit する(exit 2 — 「exit code」参照)。
 
 ## health 判定(決定的に)
