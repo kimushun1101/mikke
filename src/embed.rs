@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 /// 1 バッチのテキスト数。attention は系列長の 2 乗でメモリを食うため控えめに
@@ -68,17 +68,51 @@ struct Encoder {
     device: Device,
 }
 
+fn hf_cache_dir(
+    hf_hub_cache: Option<&str>,
+    hf_home: Option<&str>,
+    xdg_cache_home: Option<&str>,
+) -> Option<PathBuf> {
+    if let Some(path) = hf_hub_cache.filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+    if let Some(path) = hf_home.filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(path).join("hub"));
+    }
+    xdg_cache_home
+        .filter(|value| !value.is_empty())
+        .map(|path| PathBuf::from(path).join("huggingface").join("hub"))
+}
+
 impl Encoder {
     /// HF Hub cache からモデル一式をロードする (cache に無いファイルのみダウンロード)。
     fn load(model_id: &str) -> Result<Encoder, String> {
         let device = Device::Cpu;
-        let api = hf_hub::api::sync::Api::new()
+        let hf_hub_cache = std::env::var("HF_HUB_CACHE").ok();
+        let hf_home = std::env::var("HF_HOME").ok();
+        let xdg_cache_home = std::env::var("XDG_CACHE_HOME").ok();
+        let cache_dir = hf_cache_dir(
+            hf_hub_cache.as_deref(),
+            hf_home.as_deref(),
+            xdg_cache_home.as_deref(),
+        );
+        // 場所を先に決めてから builder を作る。from_env は空の HF_HOME を cwd 相対の hub に
+        // してしまい、token もそこから読むため使わない (HF_ENDPOINT だけは同じく読む)
+        let cache = cache_dir.map_or_else(hf_hub::Cache::default, hf_hub::Cache::new);
+        let cache_location = cache.path().display().to_string();
+        let mut builder = hf_hub::api::sync::ApiBuilder::from_cache(cache);
+        if let Some(endpoint) = std::env::var("HF_ENDPOINT").ok().filter(|v| !v.is_empty()) {
+            builder = builder.with_endpoint(endpoint);
+        }
+        let api = builder
+            .build()
             .map_err(|e| format!("Hugging Face Hub API の初期化に失敗: {e}"))?;
         let repo = api.model(model_id.to_string());
         let fetch = |file: &str| {
             repo.get(file).map_err(|e| {
                 format!(
                     "モデル {model_id} の {file} を取得できません: {e}\n  \
+                     探した cache: {cache_location}\n  \
                      初回は Hugging Face からのダウンロードが必要です (オフライン/社内網は README 参照)。"
                 )
             })
@@ -595,6 +629,23 @@ pub fn semantic_ranked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hf_cache_dir_priority() {
+        assert_eq!(
+            hf_cache_dir(Some("/hub-cache"), Some("/hf-home"), Some("/xdg-cache")),
+            Some(PathBuf::from("/hub-cache"))
+        );
+        assert_eq!(
+            hf_cache_dir(Some(""), Some("/hf-home"), Some("/xdg-cache")),
+            Some(PathBuf::from("/hf-home/hub"))
+        );
+        assert_eq!(
+            hf_cache_dir(None, Some(""), Some("/xdg-cache")),
+            Some(PathBuf::from("/xdg-cache/huggingface/hub"))
+        );
+        assert_eq!(hf_cache_dir(Some(""), Some(""), Some("")), None);
+    }
 
     #[test]
     fn iso8601_epoch_zero() {
