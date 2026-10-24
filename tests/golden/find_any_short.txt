@@ -1,0 +1,12 @@
+全文検索 '短い 制御' の結果 (2件, 簡易スコア順 (短語を含み BM25 算出不可), いずれかを含む (OR)):
+
+  短い (2026-06-01)
+    path: notes/short.md
+    tags: misc
+    summary: (なし — 要約未設定。内容は path を開いて確認)
+
+  ロボット制御メモ (2026-05-10)
+    path: notes/robotics-control.md
+    tags: control, robotics
+    summary: PID とモデル予測制御の比較。
+

@@ -1,1 +1,1 @@
-{"type":"meta","command":"find","count":0,"order":"relevance","capped":false}
+{"type":"meta","command":"find","count":0,"match":"all","order":"relevance","capped":false}
