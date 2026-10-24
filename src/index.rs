@@ -660,7 +660,8 @@ fn write_index(cfg: &Config, use_stderr: bool, lock: &BuildLock) -> BuildIssues 
     // notes 行数と違い読込不可ファイルの有無で恒常 stale 化しない。
     let mut scanned_paths: Vec<String> = Vec::new();
 
-    for (md_file, rel) in scan::iter_notes(cfg) {
+    let scan_result = scan::scan_notes(cfg);
+    for (md_file, rel) in scan_result.notes {
         let rel_posix = to_posix(&rel);
         scanned_paths.push(rel_posix.clone());
         if let Some((kind, detail)) = scan::scan_frontmatter_issue(&md_file) {
@@ -801,6 +802,24 @@ fn write_index(cfg: &Config, use_stderr: bool, lock: &BuildLock) -> BuildIssues 
                 issues.empty_tags.len()
             ),
         );
+    }
+    if !scan_result.nested_repos.is_empty() {
+        emit(
+            use_stderr,
+            &format!(
+                "ネストしたノート repo: {}件",
+                scan_result.nested_repos.len()
+            ),
+        );
+        for repo in &scan_result.nested_repos {
+            emit(
+                use_stderr,
+                &format!(
+                    "  {} ({}): ノート {}件",
+                    repo.root_rel, repo.config_file, repo.note_count
+                ),
+            );
+        }
     }
     issues
 }

@@ -28,6 +28,20 @@ pub struct Note {
     pub content: String, // frontmatter を除いた本文
 }
 
+/// 最上位 root から委譲したネスト repo と、その配下のノート数。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NestedRepo {
+    pub root_rel: String,
+    pub config_file: String,
+    pub note_count: usize,
+}
+
+/// 重複除去後のノートと、走査中に委譲したネスト repo。
+pub struct ScanResult {
+    pub notes: Vec<(PathBuf, PathBuf)>,
+    pub nested_repos: Vec<NestedRepo>,
+}
+
 /// CJK 文字数 + スペース区切り語数。
 /// 文字クラスは正確に: CJK = `[\u{3000}-\u{9fff}\u{f900}-\u{faff}\u{ff66}-\u{ff9f}]` の文字数、
 /// ascii = `[a-zA-Z0-9]+` の語数。範囲はエスケープで書く (生リテラルは NFC 化で壊れる)。
@@ -193,12 +207,18 @@ fn has_config(dir: &Path) -> bool {
 /// 設定ファイルを持つサブディレクトリは「ネストしたノート repo」として、その配下の走査を
 /// 子の [scan]/[index] 設定へ委譲する (rel は常に最上位 root 相対。docs/SPEC.md 参照)。
 pub fn iter_notes(cfg: &Config) -> Vec<(PathBuf, PathBuf)> {
+    scan_notes(cfg).notes
+}
+
+/// 対象 .md とネスト repo の要約を列挙。
+pub fn scan_notes(cfg: &Config) -> ScanResult {
     let top_root = cfg.root.clone();
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut out: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut nested: BTreeSet<(String, String)> = BTreeSet::new();
     for inc in &cfg.include {
         let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
-        walk_include(cfg, inc, &top_root, &mut files);
+        walk_include(cfg, inc, &top_root, &mut files, &mut nested);
         files.sort(); // PathBuf の Ord (コンポーネント単位) で走査順を決定的にする
         for (abs, rel) in files {
             if seen.insert(rel.clone()) {
@@ -206,7 +226,21 @@ pub fn iter_notes(cfg: &Config) -> Vec<(PathBuf, PathBuf)> {
             }
         }
     }
-    out
+    let nested_repos = nested
+        .into_iter()
+        .map(|(root_rel, config_file)| NestedRepo {
+            note_count: out
+                .iter()
+                .filter(|(_, rel)| under_prefix(&to_posix(rel), &root_rel))
+                .count(),
+            root_rel,
+            config_file,
+        })
+        .collect();
+    ScanResult {
+        notes: out,
+        nested_repos,
+    }
 }
 
 /// rel (repo root 相対の posix パス) が prefix そのものか、その配下か (要素単位。state は statement に当たらない)。
@@ -338,7 +372,13 @@ fn build_ignore(dir: &Path, file: &Path) -> Option<Gitignore> {
 }
 
 /// repo (cfg) の include 起点 1 つを走査する。起点自身がネスト repo ならそちらへ委譲。
-fn walk_include(cfg: &Config, inc: &str, top_root: &Path, files: &mut Vec<(PathBuf, PathBuf)>) {
+fn walk_include(
+    cfg: &Config,
+    inc: &str,
+    top_root: &Path,
+    files: &mut Vec<(PathBuf, PathBuf)>,
+    nested: &mut BTreeSet<(String, String)>,
+) {
     let base = match cfg.root.join(inc).canonicalize() {
         Ok(b) if b.is_dir() => b,
         _ => return,
@@ -373,9 +413,9 @@ fn walk_include(cfg: &Config, inc: &str, top_root: &Path, files: &mut Vec<(PathB
         }
     }
     if base != cfg.root && has_config(&base) {
-        walk_nested(cfg, &base, top_root, files);
+        walk_nested(cfg, &base, top_root, files, nested);
     } else {
-        walk_dir(&base, cfg, ig.as_ref(), top_root, files);
+        walk_dir(&base, cfg, ig.as_ref(), top_root, files, nested);
     }
 }
 
@@ -387,7 +427,13 @@ fn walk_include(cfg: &Config, inc: &str, top_root: &Path, files: &mut Vec<(PathB
 /// (entry.file_type() は lstat 相当で、symlink は is_dir() false)、(2) repo 外を指す
 /// include は walk_include の strip_prefix で弾かれる、(3) 委譲は「repo ルートの真部分
 /// ディレクトリ」に対してのみ起きるため canonical パス深度が単調増加する。
-fn walk_nested(parent: &Config, root: &Path, top_root: &Path, files: &mut Vec<(PathBuf, PathBuf)>) {
+fn walk_nested(
+    parent: &Config,
+    root: &Path,
+    top_root: &Path,
+    files: &mut Vec<(PathBuf, PathBuf)>,
+    nested: &mut BTreeSet<(String, String)>,
+) {
     // 親の exclude_paths は境界の入口までしか効かない。中を指す値は知らせる
     if let (Ok(r), Some(cfg_path)) = (root.strip_prefix(&parent.root), &parent.config_path) {
         let rel = to_posix(r);
@@ -402,8 +448,18 @@ fn walk_nested(parent: &Config, root: &Path, top_root: &Path, files: &mut Vec<(P
         }
     }
     let child = load_scan_config(root.to_path_buf());
+    if let (Ok(rel), Some(config_path)) = (root.strip_prefix(top_root), &child.config_path) {
+        nested.insert((
+            to_posix(rel),
+            config_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+        ));
+    }
     for inc in &child.include {
-        walk_include(&child, inc, top_root, files);
+        walk_include(&child, inc, top_root, files, nested);
     }
 }
 
@@ -415,6 +471,7 @@ fn walk_dir(
     ig: Option<&GitIgnores>,
     top_root: &Path,
     files: &mut Vec<(PathBuf, PathBuf)>,
+    nested: &mut BTreeSet<(String, String)>,
 ) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -440,10 +497,10 @@ fn walk_dir(
                 continue;
             }
             if has_config(&path) {
-                walk_nested(cfg, &path, top_root, files);
+                walk_nested(cfg, &path, top_root, files, nested);
             } else {
                 let next = ig.map(|g| g.enter(&path));
-                walk_dir(&path, cfg, next.as_ref(), top_root, files);
+                walk_dir(&path, cfg, next.as_ref(), top_root, files, nested);
             }
         } else if name.ends_with(".md") && path.is_file() {
             if cfg.exclude_files.contains(&name)
