@@ -11,6 +11,11 @@ mod normalize;
 mod scan;
 mod search;
 
+// musl の既定 allocator はモデル読み込みが遅いため、semantic 入りの full 版だけ mimalloc を使う。
+#[cfg(all(target_env = "musl", feature = "semantic"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 

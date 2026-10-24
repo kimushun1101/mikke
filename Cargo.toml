@@ -18,7 +18,7 @@ path = "src/main.rs"
 [features]
 default = []
 # semantic 検索 (embedding)。既定 OFF で BM25 のみの軽量ビルド。
-semantic = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:hf-hub"]
+semantic = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:hf-hub", "dep:mimalloc"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -43,7 +43,8 @@ candle-nn = { version = "0.8", optional = true }
 candle-transformers = { version = "0.8", optional = true }
 # default features から esaxx_fast (C++ suffix array, Unigram 訓練専用で mikke は未使用) と
 # progressbar (訓練進捗表示) を外す。onig は維持 (regex エンジンを既定と同一に保つ)。
-# これで C++ 依存が消え、musl static ビルドが musl-gcc (musl-tools) のみで通る。
+# これで C++ 依存が消え、mimalloc も純 C のため musl static ビルドは
+# musl-gcc (musl-tools) のみで通る。
 tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
 # default (native-tls) は openssl-dev 必須のため、rustls ベースの ureq 経路のみ有効化
 # (safetensors の読み書きは candle-core 経由 = candle_core::safetensors)
@@ -54,6 +55,10 @@ hf-hub = { version = "0.4", optional = true, default-features = false, features 
 # pure Rust で C ツールチェーンを要求しないため musl static ビルドも壊さない。
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_env = "musl")'.dependencies]
+# full 版のモデル読み込みを高速化する。slim 版には含めず、追加機能も有効化しない。
+mimalloc = { version = "0.1", optional = true, default-features = false }
 
 [profile.release]
 lto = true
