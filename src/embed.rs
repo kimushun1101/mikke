@@ -6,10 +6,10 @@
 //!   クエリ側に query_prefix。attention mask で mean pooling → L2 normalize して保存。
 //!   差分検出はファイル内容の SHA-256。model / passage_prefix 変更時は全再構築。
 //!   削除のみの更新でも保存し直す (消えたベクトルが結果に残り続けるのを防ぐ)。
+//!   長いノートは token 窓に分割し、ノートの類似度は全窓の最大値とする。
 //!   保存: embeddings_dir/embeddings.safetensors ("vectors" 行列 f32 [n, d]) + metadata.json
-//!   (generated, model, query_prefix, passage_prefix, note_count, notes[{path,title,hash}])。
-//!   順序 = vectors 行と一致。semantic_ranked は metadata の model/query_prefix を優先して
-//!   エンコード (保存済みベクトルとエンコード条件を揃える)。
+//!   (generated, model, query_prefix, passage_prefix, chunking, note_count,
+//!   notes[{path,title,hash,chunks}])。順序 = ノート順、その中で窓順。
 
 use crate::config::{display_path, to_posix, Config};
 use crate::scan;
@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Write as _;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
@@ -27,32 +28,46 @@ use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 /// (最悪 8 × 12head × 512² × 4B ≈ 400MB の一時領域)。
 const BATCH_SIZE: usize = 8;
 
-/// 埋め込みを永続化する単位。推論 32 バッチごとに中間結果を残す。
+/// 埋め込みを永続化する目安の窓数。推論 32 バッチ分を超えたノートの切れ目で中間結果を残す
+/// (1 ノートの窓は同じ保存に入れる)。
 const SAVE_CHUNK_SIZE: usize = BATCH_SIZE * 32;
 
 /// E5 系の系列長上限。モデル config の max_position_embeddings とこの値の小さい方で切る。
 const MAX_SEQ_LEN: usize = 512;
 
-// --- metadata.json (Python 版と互換のスキーマ) ---
+/// 長いノートの隣接窓で重ねる token 数。
+const CHUNK_OVERLAP_TOKENS: usize = 64;
+
+/// 長いノートの本文窓に入れる token 数。
+const CHUNK_WINDOW_TOKENS: usize = 384;
+
+/// metadata / vectors の chunk 保存方式。
+const CHUNKING_VERSION: u32 = 1;
+
+// --- metadata.json ---
 
 #[derive(Serialize, Deserialize)]
 struct MetaNote {
     path: String,
     title: String,
     hash: String,
+    #[serde(default)]
+    chunks: usize,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Metadata {
     #[serde(default)]
     generated: String,
-    // Python 版同様「キー欠落は設定値へフォールバック」を残すため Option (欠落 ≠ 空文字)。
+    // 旧形式同様「キー欠落は設定値へフォールバック」を残すため Option (欠落 ≠ 空文字)。
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
     query_prefix: Option<String>,
     #[serde(default)]
     passage_prefix: Option<String>,
+    #[serde(default)]
+    chunking: Option<u32>,
     #[serde(default)]
     note_count: usize,
     #[serde(default)]
@@ -64,8 +79,10 @@ struct Metadata {
 /// tokenizer + BERT 系モデル一式。E5 系 (multilingual-e5-*) を想定。
 struct Encoder {
     tokenizer: Tokenizer,
+    chunk_tokenizer: Tokenizer,
     model: BertModel,
     device: Device,
+    max_len: usize,
 }
 
 fn hf_cache_dir(
@@ -133,6 +150,12 @@ impl Encoder {
 
         let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| format!("tokenizer の読み込みに失敗: {e}"))?;
+        // 窓の作成では系列全体の offsets が必要なため、truncation / padding を明示的に外す。
+        let mut chunk_tokenizer = tokenizer.clone();
+        chunk_tokenizer
+            .with_truncation(None)
+            .map_err(|e| format!("chunk tokenizer の truncation 解除に失敗: {e}"))?;
+        chunk_tokenizer.with_padding(None);
         let pad_id = tokenizer
             .token_to_id("<pad>")
             .or_else(|| tokenizer.token_to_id("[PAD]"))
@@ -160,13 +183,15 @@ impl Encoder {
             .map_err(|e| format!("モデルの構築に失敗 (BERT 系モデルのみ対応): {e}"))?;
         Ok(Encoder {
             tokenizer,
+            chunk_tokenizer,
             model,
             device,
+            max_len,
         })
     }
 
     /// texts を L2 正規化済み埋め込みへ (入力順を保持)。
-    /// progress = Some((それまでに終えた件数, 全体の件数)) で stderr に全体の進捗を出す (改行はしない)。
+    /// progress = Some((それまでに終えた窓数, 全体の窓数)) で stderr に全体の進捗を出す (改行はしない)。
     fn encode(
         &self,
         texts: &[String],
@@ -192,11 +217,71 @@ impl Encoder {
             }
             done += chunk.len();
             if let Some((before, total)) = progress {
-                eprint!("\r  {}/{total} 件", before + done);
+                eprint!("\r  {}/{total} 窓", before + done);
                 let _ = std::io::stderr().flush();
             }
         }
         Ok(out)
+    }
+
+    /// 短いノートは従来と同じ入力を返し、長いノートだけ token offsets で窓に分ける。
+    fn note_texts(
+        &self,
+        note: &CollectedNote,
+        passage_prefix: &str,
+    ) -> Result<Vec<String>, String> {
+        let full = format!("{passage_prefix}{}", note.text);
+        let full_len = self
+            .chunk_tokenizer
+            .encode(full.as_str(), true)
+            .map_err(|e| format!("{} の tokenize に失敗: {e}", note.path))?
+            .len();
+        if full_len <= self.max_len {
+            return build_note_texts(
+                &full,
+                "",
+                "",
+                full_len,
+                self.max_len,
+                &[],
+                0,
+                CHUNK_OVERLAP_TOKENS,
+            );
+        }
+
+        let header = format!("{passage_prefix}{}\n", note.title);
+        let header_len = self
+            .chunk_tokenizer
+            .encode(header.as_str(), true)
+            .map_err(|e| format!("{} の title tokenize に失敗: {e}", note.path))?
+            .len();
+        // title が長い・上限の小さいモデルでは窓を縮める。overlap の 2 倍も取れなければ
+        // 窓に分けず、従来どおり上限で切り詰めた 1 テキストにする (1 ノートで embed 全体を止めない)
+        let window = CHUNK_WINDOW_TOKENS.min(self.max_len.saturating_sub(header_len));
+        let body_encoding = self
+            .chunk_tokenizer
+            .encode(note.chunk_body.as_str(), false)
+            .map_err(|e| format!("{} の本文 tokenize に失敗: {e}", note.path))?;
+        let offsets = body_encoding.get_offsets();
+        if window <= CHUNK_OVERLAP_TOKENS * 2 || offsets.is_empty() {
+            eprintln!(
+                "Warning: {} は title が長く窓に分けられないため、先頭 {} token だけを埋め込みます",
+                note.path, self.max_len
+            );
+            return Ok(vec![full]);
+        }
+
+        // 窓の切れ目で token がつながり直して上限をわずかに超えても、encode の truncation で切る
+        build_note_texts(
+            &full,
+            &header,
+            &note.chunk_body,
+            full_len,
+            self.max_len,
+            offsets,
+            window,
+            CHUNK_OVERLAP_TOKENS,
+        )
     }
 
     /// 1 バッチの forward → attention mask で mean pooling → L2 normalize。
@@ -229,6 +314,66 @@ impl Encoder {
         let norm = mean.sqr()?.sum_keepdim(1)?.sqrt()?.maximum(1e-12)?;
         mean.broadcast_div(&norm)?.to_vec2::<f32>()
     }
+}
+
+/// token offsets を固定 token 幅・固定 overlap の UTF-8 byte range に変換する。
+fn chunk_byte_ranges(
+    body_len: usize,
+    offsets: &[(usize, usize)],
+    window_tokens: usize,
+    overlap_tokens: usize,
+) -> Result<Vec<Range<usize>>, String> {
+    if window_tokens == 0 || overlap_tokens >= window_tokens {
+        return Err("token 窓は overlap より広くする必要があります".to_string());
+    }
+    if offsets.is_empty() {
+        return Ok(std::iter::once(0..body_len).collect());
+    }
+
+    let stride = window_tokens - overlap_tokens;
+    let mut ranges = Vec::new();
+    let mut token_start = 0;
+    while token_start < offsets.len() {
+        let token_end = (token_start + window_tokens).min(offsets.len());
+        let byte_start = if token_start == 0 {
+            0
+        } else {
+            offsets[token_start].0
+        };
+        let byte_end = if token_end == offsets.len() {
+            body_len
+        } else {
+            offsets[token_end].0
+        };
+        ranges.push(byte_start..byte_end);
+        if token_end == offsets.len() {
+            break;
+        }
+        token_start += stride;
+    }
+    Ok(ranges)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_note_texts(
+    full: &str,
+    header: &str,
+    body: &str,
+    full_tokens: usize,
+    max_len: usize,
+    offsets: &[(usize, usize)],
+    window_tokens: usize,
+    overlap_tokens: usize,
+) -> Result<Vec<String>, String> {
+    if full_tokens <= max_len {
+        return Ok(vec![full.to_string()]);
+    }
+    Ok(
+        chunk_byte_ranges(body.len(), offsets, window_tokens, overlap_tokens)?
+            .into_iter()
+            .map(|range| format!("{header}{}", &body[range]))
+            .collect(),
+    )
 }
 
 // --- 埋め込みの保存/読み込み ---
@@ -269,12 +414,25 @@ fn read_metadata(path: &Path) -> Result<Metadata, String> {
     serde_json::from_str(&text).map_err(|e| format!("metadata.json の解釈に失敗: {e}"))
 }
 
+fn has_current_chunking(metadata: &Metadata) -> bool {
+    metadata.chunking == Some(CHUNKING_VERSION)
+}
+
+fn metadata_vector_count(metadata: &Metadata) -> Option<usize> {
+    metadata.notes.iter().try_fold(0usize, |total, note| {
+        (note.chunks > 0)
+            .then(|| total.checked_add(note.chunks))
+            .flatten()
+    })
+}
+
 // --- ノート収集 ---
 
 struct CollectedNote {
     path: String,
     title: String,
     text: String,
+    chunk_body: String,
     hash: String,
 }
 
@@ -283,32 +441,36 @@ struct EmbeddingSnapshot {
     notes: Vec<MetaNote>,
 }
 
+type NoteEmbeddings = Vec<Vec<f32>>;
+
 /// 現在までの計算結果を notes 順に並べる。未計算の更新ノートを旧ベクトルで残す場合は、
 /// 次回も更新対象になるよう旧 hash を維持する。
 fn assemble_embedding_snapshot(
     notes: &[CollectedNote],
-    new_embeddings: &HashMap<&str, Vec<f32>>,
-    old_embeddings: &HashMap<String, Vec<f32>>,
+    new_embeddings: &HashMap<&str, NoteEmbeddings>,
+    old_embeddings: &HashMap<String, NoteEmbeddings>,
     old_hashes: &HashMap<&str, &str>,
 ) -> EmbeddingSnapshot {
-    let mut vectors = Vec::with_capacity(notes.len());
+    let mut vectors = Vec::new();
     let mut meta_notes = Vec::with_capacity(notes.len());
     for note in notes {
-        let (vector, hash) = if let Some(vector) = new_embeddings.get(note.path.as_str()) {
-            (vector, note.hash.as_str())
-        } else if let (Some(vector), Some(hash)) = (
-            old_embeddings.get(&note.path),
-            old_hashes.get(note.path.as_str()),
-        ) {
-            (vector, *hash)
-        } else {
-            continue;
-        };
-        vectors.push(vector.clone());
+        let (note_vectors, hash) =
+            if let Some(note_vectors) = new_embeddings.get(note.path.as_str()) {
+                (note_vectors, note.hash.as_str())
+            } else if let (Some(note_vectors), Some(hash)) = (
+                old_embeddings.get(&note.path),
+                old_hashes.get(note.path.as_str()),
+            ) {
+                (note_vectors, *hash)
+            } else {
+                continue;
+            };
+        vectors.extend(note_vectors.iter().cloned());
         meta_notes.push(MetaNote {
             path: note.path.clone(),
             title: note.title.clone(),
             hash: hash.to_string(),
+            chunks: note_vectors.len(),
         });
     }
     EmbeddingSnapshot {
@@ -336,6 +498,10 @@ fn collect_notes(cfg: &Config) -> Vec<CollectedNote> {
                 continue;
             }
         };
+        // 元の埋め込みテキストで title に続く部分を保つ。summary が空の時の空行も本文側に含める。
+        let chunk_body = format!("{}\n{}", note.summary, note.content)
+            .trim_end()
+            .to_string();
         let text = format!("{}\n{}\n{}", note.title, note.summary, note.content)
             .trim()
             .to_string();
@@ -347,6 +513,7 @@ fn collect_notes(cfg: &Config) -> Vec<CollectedNote> {
             path: note.path_rel,
             title: note.title,
             text,
+            chunk_body,
             hash,
         });
     }
@@ -379,8 +546,8 @@ fn iso8601_utc(epoch_secs: u64) -> String {
 fn save_embedding_snapshot(
     cfg: &Config,
     notes: &[CollectedNote],
-    new_embeddings: &HashMap<&str, Vec<f32>>,
-    old_embeddings: &HashMap<String, Vec<f32>>,
+    new_embeddings: &HashMap<&str, NoteEmbeddings>,
+    old_embeddings: &HashMap<String, NoteEmbeddings>,
     old_hashes: &HashMap<&str, &str>,
 ) -> Result<(usize, usize), String> {
     let snapshot = assemble_embedding_snapshot(notes, new_embeddings, old_embeddings, old_hashes);
@@ -400,6 +567,7 @@ fn save_embedding_snapshot(
         model: Some(cfg.model.clone()),
         query_prefix: Some(cfg.query_prefix.clone()),
         passage_prefix: Some(cfg.passage_prefix.clone()),
+        chunking: Some(CHUNKING_VERSION),
         note_count: snapshot.notes.len(),
         notes: snapshot.notes,
     };
@@ -458,33 +626,40 @@ fn build_embeddings(cfg: &Config, force: bool) {
         }
     }
 
-    // モデル/prefix が変わったら全再構築 (既存ベクトルと混ぜると比較不能)
+    // chunk 方式・モデル・prefix が変わったら全再構築 (既存ベクトルと混ぜると比較不能)
     if let Some(m) = &old_meta {
-        let old_model = m.model.as_deref().unwrap_or(&cfg.model);
-        let old_ppfx = m.passage_prefix.as_deref().unwrap_or(&cfg.passage_prefix);
-        if old_model != cfg.model || old_ppfx != cfg.passage_prefix {
-            eprintln!("モデル/プレフィックス設定が変わったため全件再構築します。");
+        if !has_current_chunking(m) {
+            eprintln!("埋め込みの保存形式が変わったため全件再構築します。");
             old_meta = None;
+        } else {
+            let old_model = m.model.as_deref().unwrap_or(&cfg.model);
+            let old_ppfx = m.passage_prefix.as_deref().unwrap_or(&cfg.passage_prefix);
+            if old_model != cfg.model || old_ppfx != cfg.passage_prefix {
+                eprintln!("モデル/プレフィックス設定が変わったため全件再構築します。");
+                old_meta = None;
+            }
         }
     }
 
-    // 既存ベクトル (path → vec)。読めない/件数不一致 (途中クラッシュ等の破損) は全再構築へ倒す
+    // 既存ベクトル (path → 全窓)。読めない/件数不一致 (途中クラッシュ等の破損) は全再構築へ倒す
     // — zip で短い方に黙って合わせると metadata と行の対応がずれたベクトルを再利用しうる
-    let mut old_embeddings: HashMap<String, Vec<f32>> = HashMap::new();
+    let mut old_embeddings: HashMap<String, NoteEmbeddings> = HashMap::new();
     if let Some(m) = &old_meta {
         if !m.notes.is_empty() && embeddings_file.exists() {
             match load_vectors(&embeddings_file) {
-                Ok(vectors) if vectors.len() != m.notes.len() => {
+                Ok(vectors) if metadata_vector_count(m) != Some(vectors.len()) => {
                     eprintln!(
-                        "Warning: 既存埋め込み ({}行) と metadata ({}件) が一致しません — 全件再構築します。",
+                        "Warning: 既存埋め込み ({}行) と metadata の chunks 合計が一致しません — 全件再構築します。",
                         vectors.len(),
-                        m.notes.len()
                     );
                     old_meta = None;
                 }
                 Ok(vectors) => {
-                    for (item, vec) in m.notes.iter().zip(vectors) {
-                        old_embeddings.insert(item.path.clone(), vec);
+                    let mut row = 0;
+                    for item in &m.notes {
+                        let end = row + item.chunks;
+                        old_embeddings.insert(item.path.clone(), vectors[row..end].to_vec());
+                        row = end;
                     }
                 }
                 Err(e) => {
@@ -526,29 +701,53 @@ fn build_embeddings(cfg: &Config, force: bool) {
     );
 
     // 新規/更新分の埋め込み生成 (E5 仕様: ドキュメント側は passage_prefix 付き)
-    let mut new_embed_map: HashMap<&str, Vec<f32>> = HashMap::new();
+    let mut new_embed_map: HashMap<&str, NoteEmbeddings> = HashMap::new();
     let mut saved_stats = None;
     if !to_embed.is_empty() {
         println!("モデルをロード中: {}", cfg.model);
         let encoder = Encoder::load(&cfg.model).unwrap_or_else(|e| exit_err(&e));
-        println!("埋め込みを計算中 ({}件)...", to_embed.len());
-        let mut done = 0usize;
-        for chunk in to_embed.chunks(SAVE_CHUNK_SIZE) {
-            let texts: Vec<String> = chunk
+        let prepared: Vec<(&CollectedNote, Vec<String>)> = to_embed
+            .iter()
+            .map(|note| {
+                encoder
+                    .note_texts(note, &cfg.passage_prefix)
+                    .map(|texts| (*note, texts))
+            })
+            .collect::<Result<_, _>>()
+            .unwrap_or_else(|e| exit_err(&e));
+        let total_windows: usize = prepared.iter().map(|(_, texts)| texts.len()).sum();
+        println!("埋め込みを計算中 ({total_windows}窓)...");
+        let mut done_windows = 0usize;
+        // 保存境界はノート単位。窓数が SAVE_CHUNK_SIZE に達したノートの切れ目で区切り、
+        // 1 ノートの窓を複数 snapshot に分けない。
+        let mut groups: Vec<&[(&CollectedNote, Vec<String>)]> = Vec::new();
+        let (mut start, mut windows) = (0usize, 0usize);
+        for (i, (_, texts)) in prepared.iter().enumerate() {
+            windows += texts.len();
+            if windows >= SAVE_CHUNK_SIZE || i + 1 == prepared.len() {
+                groups.push(&prepared[start..=i]);
+                (start, windows) = (i + 1, 0);
+            }
+        }
+        for note_chunk in groups {
+            let texts: Vec<String> = note_chunk
                 .iter()
-                .map(|n| format!("{}{}", cfg.passage_prefix, n.text))
+                .flat_map(|(_, texts)| texts.iter().cloned())
                 .collect();
             let vectors = encoder
-                .encode(&texts, Some((done, to_embed.len())))
+                .encode(&texts, Some((done_windows, total_windows)))
                 .unwrap_or_else(|e| exit_err(&e));
-            for (note, vector) in chunk.iter().zip(vectors) {
-                new_embed_map.insert(note.path.as_str(), vector);
+            let mut row = 0;
+            for (note, texts) in note_chunk {
+                let end = row + texts.len();
+                new_embed_map.insert(note.path.as_str(), vectors[row..end].to_vec());
+                row = end;
             }
             saved_stats = Some(
                 save_embedding_snapshot(cfg, &notes, &new_embed_map, &old_embeddings, &old_hashes)
                     .unwrap_or_else(|e| exit_err(&e)),
             );
-            done += chunk.len();
+            done_windows += texts.len();
         }
         eprintln!();
     }
@@ -564,7 +763,28 @@ fn build_embeddings(cfg: &Config, force: bool) {
     println!("  ベクトル次元: {vector_dim}");
 }
 
-/// semantic 検索の (path, cosine 類似度) を best-first で返す。
+fn aggregate_note_scores(
+    notes: &[MetaNote],
+    similarities: &[f64],
+    top_n: usize,
+) -> Vec<(String, f64)> {
+    let mut row = 0;
+    let mut scores = Vec::with_capacity(notes.len());
+    for note in notes {
+        let end = row + note.chunks;
+        let best = similarities[row..end]
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        scores.push((note.path.clone(), best));
+        row = end;
+    }
+    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scores.truncate(top_n);
+    scores
+}
+
+/// semantic 検索の (path, 全窓で最大の cosine 類似度) を best-first で返す。
 /// 埋め込み未構築・破損は Err (呼び出し側で fallback / 明示エラー)。
 /// モデルと query prefix は埋め込み生成時の metadata を優先する。
 pub fn semantic_ranked(
@@ -578,12 +798,20 @@ pub fn semantic_ranked(
         return Err("埋め込みデータが見つかりません".to_string());
     }
     let meta = read_metadata(&metadata_file)?;
+    if !has_current_chunking(&meta) {
+        return Err(
+            "埋め込みの保存形式が古いため使用できません。mikke embed で再構築してください"
+                .to_string(),
+        );
+    }
     let vectors = load_vectors(&embeddings_file)?;
-    if vectors.len() != meta.notes.len() {
+    let expected_vectors = metadata_vector_count(&meta).ok_or_else(|| {
+        "metadata の chunks が不正です。mikke embed --force で再構築してください".to_string()
+    })?;
+    if vectors.len() != expected_vectors {
         return Err(format!(
-            "埋め込み ({}行) と metadata ({}件) が一致しません。mikke embed --force で再構築してください",
+            "埋め込み ({}行) と metadata の chunks 合計 ({expected_vectors}行) が一致しません。mikke embed --force で再構築してください",
             vectors.len(),
-            meta.notes.len()
         ));
     }
 
@@ -606,24 +834,16 @@ pub fn semantic_ranked(
     }
 
     // 保存ベクトルは正規化済み → 内積 = cosine 類似度
-    let mut sims: Vec<(usize, f64)> = vectors
+    let similarities: Vec<f64> = vectors
         .iter()
-        .enumerate()
-        .map(|(i, v)| {
-            let dot: f64 = v
-                .iter()
+        .map(|v| {
+            v.iter()
                 .zip(&query_vec)
                 .map(|(a, b)| (*a as f64) * (*b as f64))
-                .sum();
-            (i, dot)
+                .sum()
         })
         .collect();
-    sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    sims.truncate(top_n);
-    Ok(sims
-        .into_iter()
-        .map(|(i, s)| (meta.notes[i].path.clone(), s))
-        .collect())
+    Ok(aggregate_note_scores(&meta.notes, &similarities, top_n))
 }
 
 #[cfg(test)]
@@ -663,32 +883,117 @@ mod tests {
     }
 
     #[test]
+    fn chunk_ranges_follow_offsets_with_overlap_and_short_last_window() {
+        let body = "甲 乙 丙 丁 戊";
+        let offsets = [(0, 3), (4, 7), (8, 11), (12, 15), (16, 19)];
+
+        let ranges = chunk_byte_ranges(body.len(), &offsets, 3, 1).unwrap();
+        let chunks: Vec<&str> = ranges.iter().map(|range| &body[range.clone()]).collect();
+        let texts = build_note_texts(
+            "unused full text",
+            "passage: 題名\n",
+            body,
+            6,
+            5,
+            &offsets,
+            3,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(chunks, vec!["甲 乙 丙 ", "丙 丁 戊"]);
+        assert_eq!(
+            texts,
+            vec!["passage: 題名\n甲 乙 丙 ", "passage: 題名\n丙 丁 戊"]
+        );
+    }
+
+    #[test]
+    fn note_within_limit_keeps_the_exact_original_text() {
+        let full = "passage: title\nsummary\nbody";
+
+        let texts = build_note_texts(full, "unused", "unused", 12, 12, &[], 0, 64).unwrap();
+
+        assert_eq!(texts, vec![full]);
+    }
+
+    #[test]
+    fn note_scores_use_the_best_chunk() {
+        let notes = vec![
+            MetaNote {
+                path: "first.md".to_string(),
+                title: "first".to_string(),
+                hash: "a".to_string(),
+                chunks: 2,
+            },
+            MetaNote {
+                path: "second.md".to_string(),
+                title: "second".to_string(),
+                hash: "b".to_string(),
+                chunks: 1,
+            },
+        ];
+
+        let ranked = aggregate_note_scores(&notes, &[0.1, 0.9, 0.8], 2);
+
+        assert_eq!(
+            ranked,
+            vec![
+                ("first.md".to_string(), 0.9),
+                ("second.md".to_string(), 0.8)
+            ]
+        );
+    }
+
+    #[test]
+    fn metadata_without_chunking_version_is_not_reusable() {
+        let metadata: Metadata = serde_json::from_str(
+            r#"{"model":"model","notes":[{"path":"old.md","title":"old","hash":"hash"}]}"#,
+        )
+        .unwrap();
+        let different_version: Metadata = serde_json::from_str(
+            r#"{"chunking":2,"notes":[{"path":"future.md","title":"future","hash":"hash","chunks":1}]}"#,
+        )
+        .unwrap();
+
+        assert!(!has_current_chunking(&metadata));
+        assert!(!has_current_chunking(&different_version));
+        assert_eq!(metadata_vector_count(&metadata), None);
+    }
+
+    #[test]
     fn snapshot_keeps_old_hash_for_pending_updated_note() {
         let notes = vec![
             CollectedNote {
                 path: "computed.md".to_string(),
                 title: "computed".to_string(),
                 text: String::new(),
+                chunk_body: String::new(),
                 hash: "new-computed".to_string(),
             },
             CollectedNote {
                 path: "pending-updated.md".to_string(),
                 title: "pending updated".to_string(),
                 text: String::new(),
+                chunk_body: String::new(),
                 hash: "new-pending".to_string(),
             },
             CollectedNote {
                 path: "pending-new.md".to_string(),
                 title: "pending new".to_string(),
                 text: String::new(),
+                chunk_body: String::new(),
                 hash: "new-note".to_string(),
             },
         ];
-        let new_embeddings = HashMap::from([("computed.md", vec![1.0])]);
+        let new_embeddings = HashMap::from([("computed.md", vec![vec![1.0], vec![1.5]])]);
         let old_embeddings = HashMap::from([
-            ("computed.md".to_string(), vec![9.0]),
-            ("pending-updated.md".to_string(), vec![2.0]),
-            ("deleted.md".to_string(), vec![3.0]),
+            ("computed.md".to_string(), vec![vec![9.0]]),
+            (
+                "pending-updated.md".to_string(),
+                vec![vec![2.0], vec![2.5], vec![2.75]],
+            ),
+            ("deleted.md".to_string(), vec![vec![3.0]]),
         ]);
         let old_hashes = HashMap::from([
             ("computed.md", "old-computed"),
@@ -699,11 +1004,16 @@ mod tests {
         let snapshot =
             assemble_embedding_snapshot(&notes, &new_embeddings, &old_embeddings, &old_hashes);
 
-        assert_eq!(snapshot.vectors, vec![vec![1.0], vec![2.0]]);
+        assert_eq!(
+            snapshot.vectors,
+            vec![vec![1.0], vec![1.5], vec![2.0], vec![2.5], vec![2.75]]
+        );
         assert_eq!(snapshot.notes.len(), 2);
         assert_eq!(snapshot.notes[0].path, "computed.md");
         assert_eq!(snapshot.notes[0].hash, "new-computed");
+        assert_eq!(snapshot.notes[0].chunks, 2);
         assert_eq!(snapshot.notes[1].path, "pending-updated.md");
         assert_eq!(snapshot.notes[1].hash, "old-pending");
+        assert_eq!(snapshot.notes[1].chunks, 3);
     }
 }
