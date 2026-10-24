@@ -49,6 +49,8 @@ enum Command {
         force: bool,
     },
     /// 全文検索 (FTS5 trigram, BM25 順。短語混在時は簡易スコア順)
+    ///
+    /// 既定は全語を含む (AND)、--any でいずれかを含む (OR)。
     Find {
         #[arg(required = true, value_name = "検索語")]
         words: Vec<String>,
@@ -58,6 +60,12 @@ enum Command {
         /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
         #[arg(long)]
         json: bool,
+        /// いずれかの語を含むノートを検索する (OR)
+        #[arg(long)]
+        any: bool,
+        /// 各ノートで検索語が当たった行を最大 3 行表示する
+        #[arg(long)]
+        snippet: bool,
     },
     /// タグ検索 (部分一致, date (空なら updated) 降順)
     Tag {
@@ -92,6 +100,8 @@ enum Command {
         json: bool,
     },
     /// ハイブリッド検索 (BM25 + semantic の RRF 融合)。埋め込み未構築なら BM25 のみへ degrade
+    ///
+    /// 既定は全語を含む (AND)、--any でいずれかを含む (OR)。
     Hybrid {
         #[arg(required = true, value_name = "クエリ")]
         query: Vec<String>,
@@ -100,6 +110,9 @@ enum Command {
         /// JSON Lines で出力 (1 行目メタ行 + 1 件 1 行)
         #[arg(long)]
         json: bool,
+        /// BM25 ではいずれかの語を含むノートを検索する (OR)
+        #[arg(long)]
+        any: bool,
     },
     /// タグ一覧 (使用回数順)
     #[command(name = "list-tags")]
@@ -167,7 +180,13 @@ fn main() {
             index::cmd_index(&cfg, check);
             None
         }
-        Command::Find { words, top, json } => Some(search::cmd_find(&cfg, &words, top, json)),
+        Command::Find {
+            words,
+            top,
+            json,
+            any,
+            snippet,
+        } => Some(search::cmd_find(&cfg, &words, top, json, any, snippet)),
         Command::Tag { keyword, top, json } => Some(search::cmd_tag(&cfg, &keyword, top, json)),
         Command::Title { keyword, top, json } => Some(search::cmd_title(&cfg, &keyword, top, json)),
         Command::ListTags { json } => {
@@ -181,9 +200,12 @@ fn main() {
         Command::Semantic { query, top, json } => {
             Some(search::cmd_semantic(&cfg, &query.join(" "), top, json))
         }
-        Command::Hybrid { query, top, json } => {
-            Some(search::cmd_hybrid(&cfg, &query.join(" "), top, json))
-        }
+        Command::Hybrid {
+            query,
+            top,
+            json,
+            any,
+        } => Some(search::cmd_hybrid(&cfg, &query.join(" "), top, json, any)),
         Command::Links { note } => Some(search::cmd_links(&cfg, &note)),
         Command::Backlinks { note } => Some(search::cmd_backlinks(&cfg, &note)),
         Command::Health { md_report } => {

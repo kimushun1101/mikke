@@ -463,6 +463,217 @@ fn json_meta(root: &Path, args: &[&str]) -> serde_json::Value {
         .unwrap_or_else(|e| panic!("{args:?} のメタ行を読めない ({e}):\n{stdout}"))
 }
 
+/// --any は MATCH / 短語 LIKE の両経路と hybrid の BM25 ストリームを OR にする。
+/// JSON メタ行と help にも結合方法を明示する。
+#[test]
+fn any_matches_either_term_and_is_described() {
+    let root = temp_copy("any");
+    run(&root, &["index"]);
+    let expected = vec![
+        "notes/robotics-control.md".to_string(),
+        "notes/robotics-slam.md".to_string(),
+    ];
+
+    assert!(hit_paths(&root, &["find", "slam", "制御周期"]).is_empty());
+    assert_eq!(
+        hit_paths(&root, &["find", "slam", "制御周期", "--any"]),
+        expected
+    );
+    assert_eq!(
+        hit_paths(&root, &["find", "短い", "制御", "--any"]),
+        vec![
+            "notes/robotics-control.md".to_string(),
+            "notes/short.md".to_string()
+        ]
+    );
+    assert_eq!(
+        hit_paths(
+            &root,
+            &["hybrid", "slam", "制御周期", "--any", "--top", "5"]
+        ),
+        expected
+    );
+
+    let meta = json_meta(&root, &["find", "slam", "制御周期", "--json"]);
+    assert_eq!(meta["match"], "all");
+    let meta = json_meta(
+        &root,
+        &[
+            "hybrid",
+            "slam",
+            "制御周期",
+            "--any",
+            "--top",
+            "5",
+            "--json",
+        ],
+    );
+    assert_eq!(meta["match"], "any");
+
+    for command in ["find", "hybrid"] {
+        let out = Command::new(bin())
+            .args([command, "--help"])
+            .output()
+            .expect("failed to run mikke --help");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("既定は全語を含む (AND)、--any でいずれかを含む (OR)"),
+            "{command} --help:\n{stdout}"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// --snippet は生ファイルの行番号と原文を出し、--any でも各行はいずれかの語で判定する。
+/// BOM は行番号に影響せず、幅と大文字小文字を畳んで先頭 3 行までに絞る。
+#[test]
+fn find_snippet_prints_matching_raw_lines() {
+    let root = temp_repo(
+        "find-snippet-lines",
+        &[
+            ("mikke.toml", ""),
+            (
+                "notes/snippet.md",
+                "\u{feff}---\ntitle: Snippet\nsummary: 該当行の確認\n---\n関係ない行。\nＧＰＳ の記録。\n間の行。\nNEEDLE 二つ目。\ngps 三つ目。\nneedle 四つ目。\n",
+            ),
+        ],
+    );
+    run(&root, &["index"]);
+
+    let (stdout, stderr) = run(&root, &["find", "gps", "needle", "--any", "--snippet"]);
+    assert!(stderr.is_empty(), "--snippet が stderr を出した:\n{stderr}");
+    assert!(stdout.contains("    6: ＧＰＳ の記録。"), "{stdout}");
+    assert!(stdout.contains("    8: NEEDLE 二つ目。"), "{stdout}");
+    assert!(stdout.contains("    9: gps 三つ目。"), "{stdout}");
+    assert!(!stdout.contains("10: needle 四つ目。"), "{stdout}");
+
+    // 索引と同じく和欧間スペースを除いて判定する (「GPS の」は「gpsの」で当たる)
+    let (stdout, _) = run(&root, &["find", "gpsの", "--snippet"]);
+    assert!(stdout.contains("    6: ＧＰＳ の記録。"), "{stdout}");
+
+    // frontmatter の行は見出しと重なるので出さない (title の Snippet は当たり行にしない)
+    let (stdout, _) = run(&root, &["find", "snippet", "--snippet"]);
+    assert!(!stdout.contains("    2: title: Snippet"), "{stdout}");
+
+    let help = Command::new(bin())
+        .args(["find", "--help"])
+        .output()
+        .expect("failed to run mikke find --help");
+    assert!(
+        String::from_utf8_lossy(&help.stdout).contains("--snippet"),
+        "find --help に --snippet が無い:\n{}",
+        String::from_utf8_lossy(&help.stdout)
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// 長い行は一致位置の周辺へ切り出し、語と両端の省略記号を残す。
+#[test]
+fn find_snippet_centers_long_line_on_match() {
+    let long_line = format!("{}NEEDLE{}", "前".repeat(250), "後".repeat(250));
+    let note = format!("# Long\n\n{long_line}\n");
+    let root = temp_repo(
+        "find-snippet-long",
+        &[("mikke.toml", ""), ("notes/long.md", note.as_str())],
+    );
+    run(&root, &["index"]);
+
+    let (stdout, stderr) = run(&root, &["find", "needle", "--snippet"]);
+    assert!(stderr.is_empty(), "--snippet が stderr を出した:\n{stderr}");
+    let snippet = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("    3: "))
+        .unwrap_or_else(|| panic!("3 行目の snippet が無い:\n{stdout}"));
+    assert!(snippet.contains("NEEDLE"), "{snippet}");
+    assert!(
+        snippet.starts_with('…') && snippet.ends_with('…'),
+        "両側の切り出しが明示されていない: {snippet}"
+    );
+    assert!(
+        snippet.chars().count() <= 202,
+        "snippet が表示上限の目安を超えた: {} 字",
+        snippet.chars().count()
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// 含む語の種類が多い行を優先して 3 行を選び、表示はファイル内の順にする。
+#[test]
+fn find_snippet_prefers_lines_with_more_terms() {
+    let root = temp_repo(
+        "find-snippet-prefer",
+        &[
+            ("mikke.toml", ""),
+            (
+                "notes/prefer.md",
+                "# 巣箱\n巣箱 一つ目。\n巣箱 二つ目。\n巣箱 三つ目。\n巣箱 四つ目。\n巣箱 の アオゲラ。\n",
+            ),
+        ],
+    );
+    run(&root, &["index"]);
+
+    let (stdout, _) = run(&root, &["find", "巣箱", "アオゲラ", "--snippet"]);
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.starts_with("    ") && l.trim_start().starts_with(char::is_numeric))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "    1: # 巣箱",
+            "    2: 巣箱 一つ目。",
+            "    6: 巣箱 の アオゲラ。"
+        ],
+        "{stdout}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// JSON の matches は --snippet 時だけ hit 行に加わる。
+#[test]
+fn find_snippet_json_adds_matches_only_when_requested() {
+    let root = temp_repo(
+        "find-snippet-json",
+        &[
+            ("mikke.toml", ""),
+            (
+                "notes/json.md",
+                "---\ntitle: JSON\n---\n最初の needle。\n次の行。\n二つ目の NEEDLE。\n",
+            ),
+        ],
+    );
+    run(&root, &["index"]);
+
+    let (stdout, stderr) = run(&root, &["find", "needle", "--snippet", "--json"]);
+    assert!(
+        stderr.is_empty(),
+        "--snippet --json が stderr を出した:\n{stderr}"
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "メタ行 + hit 1 行のはず:\n{stdout}");
+    let hit: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(
+        hit["matches"],
+        serde_json::json!([
+            {"line": 4, "text": "最初の needle。"},
+            {"line": 6, "text": "二つ目の NEEDLE。"}
+        ])
+    );
+
+    let (stdout, _) = run(&root, &["find", "needle", "--json"]);
+    let hit: serde_json::Value = serde_json::from_str(stdout.lines().nth(1).unwrap()).unwrap();
+    assert!(
+        hit.get("matches").is_none(),
+        "--snippet 無しで matches が増えた: {hit}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// find / title / tag の `--top N` は件数を絞り、打ち切りを見出しとメタ行で示す (#73)。
 #[test]
 fn top_limits_find_title_tag() {
