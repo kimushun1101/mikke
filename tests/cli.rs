@@ -1175,7 +1175,7 @@ fn old_index_format_rebuilds_before_title_search() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(format, "3");
+    assert_eq!(format, "4");
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -2548,6 +2548,73 @@ fn index_check_exit_codes() {
         Some(0),
         "--check 無しは破損があっても exit 0 のはず:\n{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// YAML エラーの frontmatter も全文を索引し、破損検出は維持する。
+#[test]
+fn invalid_frontmatter_yaml_is_searchable_and_fails_index_check() {
+    let root = temp_repo(
+        "invalid-frontmatter-yaml",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            (
+                "notes/broken.md",
+                "---\ntitle: 巣箱の掃除: 手順\n---\n\n本文の固有語はアオゲラ観察記録。\n",
+            ),
+            // 先頭の空行は load_note と同じく除いてから破損を判定する
+            (
+                "notes/leading-blank.md",
+                "\n\n---\ntitle: 巣箱の点検: 手順\n---\n\n本文の固有語はコゲラ観察記録。\n",
+            ),
+        ],
+    );
+    run(&root, &["index"]);
+
+    for (query, path) in [
+        ("アオゲラ観察記録", "notes/broken.md"),
+        ("巣箱の掃除", "notes/broken.md"),
+        ("コゲラ観察記録", "notes/leading-blank.md"),
+    ] {
+        let out = run_raw(&root, &["find", query]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "YAML エラーのノートを '{query}' で検索できない:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains(path),
+            "YAML エラーのノートが検索結果に無い:\n{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    let check = run_raw(&root, &["index", "--check"]);
+    let check_stderr = String::from_utf8_lossy(&check.stderr);
+    assert_eq!(
+        check.status.code(),
+        Some(1),
+        "YAML エラーを index --check が exit 1 にしていない:\n{check_stderr}"
+    );
+    assert!(
+        check_stderr.contains("frontmatter YAMLエラー"),
+        "YAML エラーの Warning が無い:\n{check_stderr}"
+    );
+    assert!(
+        check_stderr.contains("leading-blank.md"),
+        "先頭に空行がある YAML エラーの Warning が無い:\n{check_stderr}"
+    );
+
+    let health = run_raw(&root, &["health"]);
+    let health_stdout = String::from_utf8_lossy(&health.stdout);
+    assert!(
+        health.status.success()
+            && health_stdout.contains("frontmatter 破損")
+            && health_stdout.contains("YAMLエラー"),
+        "health が YAML エラーを報告していない:\n{health_stdout}"
     );
     let _ = fs::remove_dir_all(&root);
 }

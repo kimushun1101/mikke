@@ -87,7 +87,7 @@ const SCHEMA: &str = "
 const META_SCANNED_PATHS: &str = "scanned_paths_sha256";
 const META_INDEX_FORMAT: &str = "index_format";
 // 正規化規則 (src/normalize.rs) や検索用の列を変えた場合は上げる。
-const INDEX_FORMAT: &str = "3";
+const INDEX_FORMAT: &str = "4";
 
 /// 走査 path 集合 (root 相対 posix) のスナップショット: ソート済リストの SHA-256。
 /// mtime が保存される移動・リネームや追加・削除を auto_rebuild の stale 判定で検知する。
@@ -656,8 +656,8 @@ fn write_index(cfg: &Config, use_stderr: bool, lock: &BuildLock) -> BuildIssues 
     let mut note_count = 0i64;
     let mut tag_set: HashSet<String> = HashSet::new();
     let mut issues = BuildIssues::default();
-    // スナップショットは走査した全 path (frontmatter 破損で notes から除外される分も含む)。
-    // notes 行数と違い破損ファイルの有無で恒常 stale 化しない。
+    // スナップショットは走査した全 path (読込不可で notes から除外される分も含む)。
+    // notes 行数と違い読込不可ファイルの有無で恒常 stale 化しない。
     let mut scanned_paths: Vec<String> = Vec::new();
 
     let scan_result = scan::scan_notes(cfg);
