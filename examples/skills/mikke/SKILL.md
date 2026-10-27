@@ -8,7 +8,7 @@ allowed-tools: Read, Grep, Glob, Bash(mikke *)
 
 出典: https://github.com/kimushun1101/mikke (examples/skills 同梱例。運用に合わせ調整可。検索セマンティクスの正本は同 repo の docs/SPEC.md)
 
-前提: `mikke` が PATH にある。root 解決順: `--root` → 環境変数 `MIKKE_ROOT` → cwd から `mikke.toml` (または `.mikke.toml`) 上方探索 → git root (cwd 外の KB は `mikke --root <path>`)。index は無ければ検索時に自動生成。Bash は `mikke` の実行のみに使い、重い `mikke embed` (初回はモデル DL あり) はユーザー確認後に実行。
+前提: `mikke` が PATH にある。root 解決順: `--root` → 環境変数 `MIKKE_ROOT` → cwd から `mikke.toml` (または `.mikke.toml`) 上方探索 (cwd 外の KB は `mikke --root <path>`)。index は無ければ検索時に自動生成。Bash は `mikke` の実行のみに使い、重い `mikke embed` (初回はモデル DL あり) はユーザー確認後に実行。
 
 ## コマンド
 
