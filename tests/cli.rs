@@ -10,11 +10,6 @@ use std::process::Command;
 
 use rusqlite::Connection;
 
-// バイナリと同じ display_path で、Windows の canonicalize 済みパスも比較する。
-#[allow(dead_code)]
-#[path = "../src/config.rs"]
-mod config;
-
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_mikke")
 }
@@ -124,13 +119,20 @@ fn assert_root_error(out: &std::process::Output, cwd: &Path, root: &Path) -> Str
     assert!(out.stdout.is_empty(), "{:?}", out.stdout);
     assert!(!root.join(".mikke").exists(), "root に .mikke/ が作られた");
     assert!(!cwd.join(".mikke").exists(), "cwd に .mikke/ が作られた");
-    let shown_cwd = config::display_path(&fs::canonicalize(cwd).unwrap());
-    assert!(
-        stderr.starts_with(&format!(
-            "Error: ルートを特定できません (cwd: {shown_cwd})。次のどれかで root を指定してください。\n"
-        )),
+    let (shown_cwd, message) = stderr
+        .strip_prefix("Error: ルートを特定できません (cwd: ")
+        .and_then(|s| s.split_once(")。"))
+        .unwrap_or_else(|| panic!("{stderr}"));
+    assert_eq!(
+        fs::canonicalize(shown_cwd).unwrap(),
+        fs::canonicalize(cwd).unwrap(),
         "{stderr}"
     );
+    assert!(
+        message.starts_with("次のどれかで root を指定してください。\n"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(r"\\?\"), "{stderr}");
     for remedy in [
         "  - ノートフォルダのルートに空の mikke.toml (または .mikke.toml) を置く\n",
         "  - --root <PATH> を付ける\n",
@@ -139,6 +141,30 @@ fn assert_root_error(out: &std::process::Output, cwd: &Path, root: &Path) -> Str
         assert!(stderr.contains(remedy), "{stderr}");
     }
     stderr
+}
+
+fn assert_git_hint(stderr: &str, expected: &Path) {
+    let shown = stderr
+        .lines()
+        .last()
+        .and_then(|line| line.strip_prefix("  "))
+        .and_then(|line| {
+            line.strip_suffix(
+                " に .git があります。0.6 までは、git repo の root を root にしていました。",
+            )
+        })
+        .unwrap_or_else(|| panic!("{stderr}"));
+    assert_eq!(
+        fs::canonicalize(shown).unwrap(),
+        fs::canonicalize(expected).unwrap(),
+        "{stderr}"
+    );
+    assert!(stderr.ends_with('\n'), "{stderr}");
+    assert_eq!(
+        stderr.matches("に .git があります。").count(),
+        1,
+        "{stderr}"
+    );
 }
 
 /// 設定の無い木は git repo 内外・サブディレクトリでも root 未特定で止まる。
@@ -184,10 +210,7 @@ fn root_required_without_config() {
                     let out = run_in_raw(cwd, args, env_root);
                     let stderr = assert_root_error(&out, cwd, &root);
                     if let Some(git_dir) = &nearest_git {
-                        let shown_root = config::display_path(git_dir);
-                        assert!(stderr.ends_with(&format!(
-                            "  {shown_root} に .git があります。0.6 までは、git repo の root を root にしていました。\n"
-                        )), "{args:?}: {stderr}");
+                        assert_git_hint(&stderr, git_dir);
                     } else {
                         assert!(!stderr.contains(".git"), "{args:?}: {stderr}");
                         assert!(!stderr.contains("0.6"), "{args:?}: {stderr}");
@@ -228,15 +251,7 @@ fn root_error_git_hint_uses_nearest_marker() {
         let cwd = nearest.join("notes");
         let out = run_in_raw(&cwd, &["find", "quokka"], None);
         let stderr = assert_root_error(&out, &cwd, &root);
-        let shown_nearest = config::display_path(&fs::canonicalize(&nearest).unwrap());
-        assert!(stderr.ends_with(&format!(
-            "  {shown_nearest} に .git があります。0.6 までは、git repo の root を root にしていました。\n"
-        )), "{stderr}");
-        assert_eq!(
-            stderr.matches("に .git があります。").count(),
-            1,
-            "{stderr}"
-        );
+        assert_git_hint(&stderr, &nearest);
         assert!(!nearest.join(".mikke").exists());
         let _ = fs::remove_dir_all(&root);
     }
