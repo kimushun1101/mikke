@@ -104,6 +104,8 @@ pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
         })
         .ok()
         .and_then(|v| v.parse::<f64>().ok());
+    // ノート全体の走査の間は閉じておく (Windows では開いている間 index を差し替えられない)
+    drop(conn);
     let mut broken: Vec<(String, String, String)> = Vec::new();
     let mut empty_tags: Vec<(String, usize)> = Vec::new();
     let mut stale_files = 0usize;
@@ -163,6 +165,7 @@ pub fn cmd_health(cfg: &Config, report_path: Option<&Path>) {
     }
 
     // --- index ベースの品質チェック (quality_skip_prefixes を適用、disable 指定は項目ごと空に) ---
+    let conn = search::connect_no_rebuild(cfg);
     let quality_rows = |check: &str, sql: &str| -> Vec<(String, String)> {
         if cfg.health_disabled(check) {
             vec![]

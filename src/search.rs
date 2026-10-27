@@ -986,6 +986,8 @@ pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize, json: bool, any: bool) 
     // --- ストリーム 1: BM25 (幅を畳んだ語で引く。semantic には原文を渡す) ---
     let folded = fold_width(query);
     let bm25_paths = bm25_ranked_paths(&conn, &folded, candidate_depth, match_mode);
+    // semantic のモデル読み込みと推論の間は閉じておく (Windows では開いている間 index を差し替えられない)
+    drop(conn);
     let bm25_rank: HashMap<&str, i64> = bm25_paths
         .iter()
         .enumerate()
@@ -1042,6 +1044,7 @@ pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize, json: bool, any: bool) 
         .iter()
         .map(|(p, s, v)| (p.as_str(), (*s, v.as_str())))
         .collect();
+    let conn = open_index(cfg);
     let mut notes = fetch_notes(&conn, &paths);
     for n in &mut notes {
         if let Some((score, via)) = meta.get(n.path.as_str()) {
