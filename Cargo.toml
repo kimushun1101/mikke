@@ -1,6 +1,6 @@
 [package]
 name = "mikke"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 # File::lock / File::try_lock が 1.89 で安定化
 rust-version = "1.89"
