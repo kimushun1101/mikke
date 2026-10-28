@@ -12,7 +12,8 @@
 //! SORT_KEY は「date、空なら updated」。同じキーは path 昇順。
 //! list-tags: GROUP BY tag ORDER BY COUNT(*) DESC, tag。
 //! hybrid RRF: 各ストリーム top_n*candidate_factor → rank 1 始まり → score += w * 1/(rrf_k+rank)。
-//!   semantic 未構築なら vec 重み 0 で再正規化し BM25 のみへ degrade。via に bm25/vec/bm25+vec。
+//!   semantic 未構築・失敗なら vec 重み 0 で再正規化し BM25 のみへ degrade。理由も表示する。
+//!   via に bm25/vec/bm25+vec。
 //! links/backlinks: links テーブル (wikilink の生 target) を読むリンクグラフ。target →
 //!   ノートの解決規則・件数・出力は docs/SPEC.md「リンクグラフ」(テキスト出力のみ)。
 //! --json: stdout を JSON Lines (1 行目メタ行 + 1 件 1 行) に切り替える。スキーマは docs/SPEC.md。
@@ -74,9 +75,12 @@ struct Meta {
     /// 打ち切り (true なら全ヒット数は不明)。tag / title は --top を付けた時だけ出す。
     #[serde(skip_serializing_if = "Option::is_none")]
     capped: Option<bool>,
-    /// hybrid のみ: semantic ストリームが使えず BM25 のみへ degrade したか (未構築・実行時失敗とも)。
+    /// hybrid のみ: semantic ストリームが使えず BM25 のみへ degrade したか (未構築・feature 無効・実行時失敗とも)。
     #[serde(skip_serializing_if = "Option::is_none")]
     degraded: Option<bool>,
+    /// hybrid で degrade した時のみ: "not_built" (ファイル無し) | "failed" (存在するが使用不可)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    degraded_reason: Option<&'static str>,
 }
 
 impl Meta {
@@ -89,6 +93,7 @@ impl Meta {
             order: None,
             capped: None,
             degraded: None,
+            degraded_reason: None,
         }
     }
 }
@@ -915,14 +920,38 @@ fn embeddings_available(cfg: &Config) -> bool {
         && cfg.embeddings_dir().join("metadata.json").exists()
 }
 
+/// embed でも使う読み込みエラーには、検索時だけ再構築の案内を補う。
+#[cfg(feature = "semantic")]
+fn semantic_error_message(error: &crate::embed::SemanticError) -> String {
+    match error {
+        crate::embed::SemanticError::Rebuild(message)
+            if !message.ends_with("再構築してください") =>
+        {
+            format!("{message}。mikke embed --force で再構築してください")
+        }
+        _ => error.to_string(),
+    }
+}
+
 pub fn cmd_semantic(cfg: &Config, query: &str, top: usize, json: bool) -> usize {
     #[cfg(feature = "semantic")]
     {
         let ranked = match crate::embed::semantic_ranked(cfg, query, top) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("Error: {e}。");
-                eprintln!("  mikke embed を実行してください (semantic feature が必要)。");
+                let message = semantic_error_message(&e);
+                let period = if message.ends_with('。') { "" } else { "。" };
+                eprintln!("Error: {message}{period}");
+                match e {
+                    crate::embed::SemanticError::NotBuilt(_) => {
+                        eprintln!("  mikke embed を実行してください (semantic feature が必要)。");
+                    }
+                    crate::embed::SemanticError::Model(_) => {
+                        eprintln!("  埋め込みは構築済みです (mikke embed の再実行は不要)。モデルの取得・読み込みを確かめてください。");
+                    }
+                    crate::embed::SemanticError::Rebuild(_)
+                    | crate::embed::SemanticError::Read(_) => {}
+                }
                 std::process::exit(2);
             }
         };
@@ -951,20 +980,35 @@ pub fn cmd_semantic(cfg: &Config, query: &str, top: usize, json: bool) -> usize 
     }
 }
 
-/// hybrid の semantic ストリーム。使えない場合は None (BM25 のみへ degrade)。
-fn semantic_stream(cfg: &Config, query: &str, depth: usize) -> Option<Vec<String>> {
+enum DegradeReason {
+    NotBuilt,
+    Failed,
+}
+
+impl DegradeReason {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::NotBuilt => "not_built",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// hybrid の semantic ストリーム。使えない場合はファイルの有無で degrade 理由を返す。
+fn semantic_stream(cfg: &Config, query: &str, depth: usize) -> Result<Vec<String>, DegradeReason> {
     if !embeddings_available(cfg) {
         if cfg.semantic_enabled {
             eprintln!("Note: 埋め込み未構築のため BM25 のみで実行します (mikke embed で有効化)。");
         }
-        return None;
+        return Err(DegradeReason::NotBuilt);
     }
     #[cfg(feature = "semantic")]
     return match crate::embed::semantic_ranked(cfg, query, depth) {
-        Ok(sem) => Some(sem.into_iter().map(|(p, _)| p).collect()),
+        Ok(sem) => Ok(sem.into_iter().map(|(p, _)| p).collect()),
         Err(e) => {
-            eprintln!("Warning: semantic 検索に失敗 ({e})、BM25 のみで継続します。");
-            None
+            let message = semantic_error_message(&e);
+            eprintln!("Warning: semantic 検索に失敗 ({message})、BM25 のみで継続します。");
+            Err(DegradeReason::Failed)
         }
     };
     #[cfg(not(feature = "semantic"))]
@@ -973,7 +1017,7 @@ fn semantic_stream(cfg: &Config, query: &str, depth: usize) -> Option<Vec<String
         eprintln!(
             "Warning: semantic 検索に失敗 (このビルドは semantic 無効)、BM25 のみで継続します。"
         );
-        None
+        Err(DegradeReason::Failed)
     }
 }
 
@@ -994,10 +1038,13 @@ pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize, json: bool, any: bool) 
         .map(|(i, p)| (p.as_str(), i as i64 + 1))
         .collect();
 
-    // --- ストリーム 2: semantic (未構築なら BM25 のみへ degrade) ---
-    let vector_paths = semantic_stream(cfg, query, candidate_depth as usize);
-    let has_vector = vector_paths.is_some();
-    let vector_paths = vector_paths.unwrap_or_default();
+    // --- ストリーム 2: semantic (未構築・失敗なら BM25 のみへ degrade) ---
+    let (vector_paths, degraded_reason) =
+        match semantic_stream(cfg, query, candidate_depth as usize) {
+            Ok(paths) => (paths, None),
+            Err(reason) => (Vec::new(), Some(reason)),
+        };
+    let has_vector = degraded_reason.is_none();
     let vector_rank: HashMap<&str, i64> = vector_paths
         .iter()
         .enumerate()
@@ -1064,12 +1111,13 @@ pub fn cmd_hybrid(cfg: &Config, query: &str, top: usize, json: bool, any: bool) 
         meta.r#match = Some(match_mode.name());
         meta.order = Some(bm25_order(relevance));
         meta.degraded = Some(!has_vector);
+        meta.degraded_reason = degraded_reason.as_ref().map(DegradeReason::name);
         print_json(&meta);
     } else {
-        let mode = if has_vector {
-            "BM25 + semantic"
-        } else {
-            "BM25 のみ (semantic 未構築)"
+        let mode = match degraded_reason {
+            None => "BM25 + semantic",
+            Some(DegradeReason::NotBuilt) => "BM25 のみ (semantic 未構築)",
+            Some(DegradeReason::Failed) => "BM25 のみ (semantic 失敗)",
         };
         // BM25 ストリームが簡易スコア順の時はそれを示す (find の見出しと同じく順序の正体を出す)
         let approx = if relevance {

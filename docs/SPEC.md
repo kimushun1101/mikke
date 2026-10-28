@@ -160,7 +160,7 @@ stale 判定は次のいずれか: (a) いずれかの md の mtime が `meta['g
 - **recent**: 並びのキーが空でないノートを、キーの降順(同じキーは path 昇順)で LIMIT。
 - **list-tags**: `GROUP BY tag ORDER BY COUNT(*) DESC, tag`。
 - **semantic**: クエリを `query_prefix + query` で encode(normalize)、保存ベクトルとの内積(= 正規化済 cosine)を計算し、長いノートは全 token 窓の最大値をノートの score として降順 top_n。返り値はノート単位。**モデル/prefix は保存 metadata を優先**(生成時とエンコード条件を揃える)。
-- **hybrid (RRF)**: 各ストリームから `top_n * candidate_factor` 取得 → rank を 1 始まりで付与 → `score += weight * 1/(rrf_k + rank)`。`--any` は BM25 ストリームの語結合だけを OR にし、semantic には従来どおり原文クエリを渡す。semantic 未構築時は vector 重み 0 で**再正規化**し BM25 のみへ degrade(`semantic.enabled` が true なら Note を stderr へ)。結果に `via`(bm25 / vec / bm25+vec)と score を表示。
+- **hybrid (RRF)**: 各ストリームから `top_n * candidate_factor` 取得 → rank を 1 始まりで付与 → `score += weight * 1/(rrf_k + rank)`。`--any` は BM25 ストリームの語結合だけを OR にし、semantic には従来どおり原文クエリを渡す。semantic が使えない時は vector 重み 0 で**再正規化**し BM25 のみへ degrade。埋め込みのファイルが無ければ未構築とし、見出しは「BM25 のみ (semantic 未構築)」となる(`semantic.enabled` が true なら Note を stderr へ)。ファイルがあるのに使えない時は失敗とし、見出しは「BM25 のみ (semantic 失敗)」、stderr は Warning となる(semantic feature の無いビルドも含む)。結果に `via`(bm25 / vec / bm25+vec)と score を表示。
 
 ## リンクグラフ(links / backlinks)
 
@@ -210,7 +210,7 @@ score/via は semantic/hybrid のみ。**summary 欠落を空白で黙らせな�
 
 **保証**: JSON モードの stdout には JSON Lines 以外を出さない。auto-build の告知・hybrid degrade の Note・Warning 類は従来どおり stderr のため、clone 直後の初回実行でも安全にパイプできる。
 
-- **メタ行(常に 1 行目)**: `{"type":"meta","command":"<サブコマンド名>","count":N}`。テキスト見出しが持つ情報を JSON でも失わないため、find は `"match"`(`"all"` = 全語 AND / `"any"` = いずれか OR)、`"order"`(`"relevance"` = BM25 順 / `"approx"` = 短語 fallback の簡易スコア順。v0.4.1 までは短語 fallback を date 降順に並べ `"date"` を出していた)、`"capped"`(上限 = `--top` か `bm25_limit` 到達 = true。ちょうど limit 件で打ち切りが無い場合も true になる保守的判定 — テキスト出力の打ち切り表示と同一条件。true のとき count を全ヒット数と誤読しない)を必ず含む。tag / title は `--top` を付けた時だけ `"capped"`(判定は find と同じ)を含む。hybrid は BM25 ストリームの結合方法を `"match"`、順序を find と同じ値の `"order"` で、`"degraded"`(semantic ストリームが使えず BM25 のみになった場合に true。埋め込み未構築のほか、構築済みでも semantic 検索の実行時失敗で true になる)を必ず含む。0 件時はメタ行のみ(hit 行 0 行)
+- **メタ行(常に 1 行目)**: `{"type":"meta","command":"<サブコマンド名>","count":N}`。テキスト見出しが持つ情報を JSON でも失わないため、find は `"match"`(`"all"` = 全語 AND / `"any"` = いずれか OR)、`"order"`(`"relevance"` = BM25 順 / `"approx"` = 短語 fallback の簡易スコア順。v0.4.1 までは短語 fallback を date 降順に並べ `"date"` を出していた)、`"capped"`(上限 = `--top` か `bm25_limit` 到達 = true。ちょうど limit 件で打ち切りが無い場合も true になる保守的判定 — テキスト出力の打ち切り表示と同一条件。true のとき count を全ヒット数と誤読しない)を必ず含む。tag / title は `--top` を付けた時だけ `"capped"`(判定は find と同じ)を含む。hybrid は BM25 ストリームの結合方法を `"match"`、順序を find と同じ値の `"order"` で、`"degraded"`(semantic ストリームが使えず BM25 のみになった場合に true。埋め込み未構築のほか、構築済みでも semantic 検索の実行時失敗で true になる)を必ず含む。`"degraded"` が true の時だけ `"degraded_reason"` を含み、値は埋め込みのファイルが無ければ `"not_built"`、あるのに使えなければ `"failed"` となる。0 件時はメタ行のみ(hit 行 0 行)
 - **hit 行(2 行目以降、1 件 1 行)**: `{"path":"...","title":"...","date":"...","updated":"...","tags":["a","b"],"summary":"...","score":0.0123,"via":"bm25+vec"}`。`type` フィールドは付けない。score は semantic/hybrid のみ、via は hybrid のみ(semantic は via を設定しない)。`find --snippet` のときだけ `"matches":[{"line":<1 始まりの行番号>,"text":"<切り出した行>"}]` を加える(当たり行が無ければ空配列)。updated と summary の空は `""` のまま(テキスト出力の sentinel 文は出さない — JSON では空文字列が欠落の明示になる)。score は f64 全精度で、テキスト出力の 4 桁丸めとは表記が異なる
 - **list-tags**: メタ行(count = タグ数)+ `{"tag":"...","count":N}` を 1 タグ 1 行
 - **スキーマ安定性**: `--json` の出力も安定インターフェース。フィールド追加は互換、既存フィールドの改名・削除・意味変更は breaking

@@ -1,2 +1,2 @@
-{"type":"meta","command":"hybrid","count":1,"match":"all","order":"approx","degraded":true}
+{"type":"meta","command":"hybrid","count":1,"match":"all","order":"approx","degraded":true,"degraded_reason":"not_built"}
 {"path":"notes/robotics-control.md","title":"ロボット制御メモ","date":"2026-05-10","updated":"","tags":["control","robotics"],"summary":"PID とモデル予測制御の比較。","score":0.01639344262295082,"via":"bm25"}

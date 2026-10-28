@@ -2611,6 +2611,297 @@ fn semantic_old_embedding_format_prompts_rebuild() {
         stderr.contains("保存形式が古い") && stderr.contains("mikke embed"),
         "旧形式の再構築案内が無い:\n{stderr}"
     );
+    assert_eq!(stderr.matches("再構築してください").count(), 1, "{stderr}");
+}
+
+/// 子プロセスだけに空または偽の cache を与え、実モデルや外部ネットワークを使わせない。
+fn run_search_offline(root: &Path, args: &[&str]) -> std::process::Output {
+    let cache = root.join(".mikke/hf-cache");
+    fs::create_dir_all(&cache).unwrap();
+    Command::new(bin())
+        .arg("--root")
+        .arg(root)
+        .args(args)
+        .env_remove("HF_HOME")
+        .env_remove("XDG_CACHE_HOME")
+        .env_remove("HF_TOKEN")
+        .env_remove("HF_TOKEN_PATH")
+        .env_remove("HF_HUB_OFFLINE")
+        .env_remove("HF_HUB_DISABLE_IMPLICIT_TOKEN")
+        .env("HF_HUB_CACHE", cache)
+        .env("HF_ENDPOINT", "http://127.0.0.1:1")
+        // ureq 2 は NO_PROXY を見ないため proxy 変数を外す。
+        .env_remove("ALL_PROXY")
+        .env_remove("all_proxy")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("https_proxy")
+        .env_remove("HTTP_PROXY")
+        .env_remove("http_proxy")
+        .output()
+        .expect("failed to run mikke")
+}
+
+fn embedding_test_repo(tag: &str) -> PathBuf {
+    let root = temp_repo(
+        tag,
+        &[
+            ("mikke.toml", "[semantic]\nenabled = true\n"),
+            ("a.md", "# A\n\nquery\n"),
+            (
+                ".mikke/embeddings/metadata.json",
+                r#"{"chunking":1,"notes":[{"path":"a.md","title":"A","hash":"hash","chunks":1}]}"#,
+            ),
+            (".mikke/embeddings/embeddings.safetensors", "placeholder"),
+        ],
+    );
+    #[cfg(feature = "semantic")]
+    {
+        let tensor = candle_core::Tensor::new(&[[1f32, 0f32]], &candle_core::Device::Cpu).unwrap();
+        candle_core::safetensors::save(
+            &std::collections::HashMap::from([("vectors", tensor)]),
+            root.join(".mikke/embeddings/embeddings.safetensors"),
+        )
+        .unwrap();
+    }
+    root
+}
+
+fn assert_hybrid_failed(root: &Path) {
+    let out = run_search_offline(root, &["hybrid", "query"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(stdout.contains("BM25 のみ (semantic 失敗)"), "{stdout}");
+    assert!(stderr.contains("Warning: semantic 検索に失敗"), "{stderr}");
+    assert!(!stderr.contains("Note: 埋め込み未構築"), "{stderr}");
+
+    let out = run_search_offline(root, &["hybrid", "query", "--json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let meta: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    assert_eq!(meta["degraded"], true);
+    assert_eq!(meta["degraded_reason"], "failed");
+    assert_eq!(meta["count"], 1);
+}
+
+#[cfg(not(feature = "semantic"))]
+#[test]
+fn hybrid_slim_with_embeddings_reports_failed() {
+    let root = embedding_test_repo("hybrid-slim-embeddings");
+    assert_hybrid_failed(&root);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(feature = "semantic")]
+fn assert_embed_corrupt_file_warning(tag: &str, file: &str, content: &[u8], reason: &str) {
+    let root = embedding_test_repo(tag);
+    fs::write(root.join(".mikke/embeddings").join(file), content).unwrap();
+    let out = run_search_offline(&root, &["embed"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    let warning = stderr
+        .lines()
+        .find(|line| line.starts_with("Warning: "))
+        .unwrap();
+    assert!(warning.contains(reason), "{warning}");
+    assert!(warning.contains("全件再構築します"), "{warning}");
+    assert!(!warning.contains("再構築してください"), "{warning}");
+    assert_eq!(warning, format!("Warning: {reason} — 全件再構築します。"));
+    assert!(stderr.contains("config.json を取得できません"), "{stderr}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(feature = "semantic")]
+#[test]
+fn embed_corrupt_metadata_warning_does_not_prompt_rebuild() {
+    assert_embed_corrupt_file_warning(
+        "emb-corrupt-metadata",
+        "metadata.json",
+        b"{broken",
+        "metadata.json の解釈に失敗: key must be a string at line 1 column 2",
+    );
+}
+
+#[cfg(feature = "semantic")]
+#[test]
+fn embed_corrupt_vectors_warning_does_not_prompt_rebuild() {
+    assert_embed_corrupt_file_warning(
+        "emb-corrupt-vectors",
+        "embeddings.safetensors",
+        b"junk",
+        "safetensors の読み込みに失敗: HeaderTooSmall",
+    );
+}
+
+#[cfg(feature = "semantic")]
+#[test]
+fn semantic_missing_embeddings_keeps_build_guidance() {
+    let root = temp_repo("sem-not-built", &[("mikke.toml", "")]);
+    let out = run_search_offline(&root, &["semantic", "query"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "Error: 埋め込みデータが見つかりません。\n  mikke embed を実行してください (semantic feature が必要)。\n"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(feature = "semantic")]
+#[test]
+fn semantic_corrupt_embeddings_prompt_force_rebuild() {
+    for (name, file, content, reason) in [
+        (
+            "count",
+            "metadata.json",
+            br#"{"chunking":1,"notes":[{"path":"a.md","title":"A","hash":"hash","chunks":2}]}"#
+                .as_slice(),
+            "chunks 合計",
+        ),
+        (
+            "metadata",
+            "metadata.json",
+            b"{broken".as_slice(),
+            "metadata.json の解釈に失敗",
+        ),
+        (
+            "utf8",
+            "metadata.json",
+            b"\xff".as_slice(),
+            "metadata.json の解釈に失敗",
+        ),
+        (
+            "vectors",
+            "embeddings.safetensors",
+            b"junk".as_slice(),
+            "safetensors の読み込みに失敗",
+        ),
+    ] {
+        let root = embedding_test_repo(&format!("sem-corrupt-{name}"));
+        fs::write(root.join(".mikke/embeddings").join(file), content).unwrap();
+        let out = run_search_offline(&root, &["semantic", "query"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains(reason), "{stderr}");
+        assert!(
+            stderr.contains("mikke embed --force で再構築してください"),
+            "{stderr}"
+        );
+        assert!(
+            !stderr.contains("mikke embed を実行してください"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("埋め込みは構築済みです"), "{stderr}");
+        assert_eq!(stderr.matches("再構築してください").count(), 1, "{stderr}");
+        assert!(!stderr.contains("。。"), "{stderr}");
+        assert_hybrid_failed(&root);
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(feature = "semantic")]
+#[test]
+fn semantic_embedding_io_errors_do_not_prompt_rebuild() {
+    for file in ["metadata.json", "embeddings.safetensors"] {
+        let root = embedding_test_repo(&format!("sem-io-{file}"));
+        let path = root.join(".mikke/embeddings").join(file);
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        let out = run_search_offline(&root, &["semantic", "query"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains("読み込みに失敗"), "{stderr}");
+        assert!(!stderr.contains("再構築"), "{stderr}");
+        assert!(!stderr.contains("mikke embed"), "{stderr}");
+        assert_hybrid_failed(&root);
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(feature = "semantic")]
+fn assert_model_failure(root: &Path, reason: &str) {
+    let out = run_search_offline(root, &["semantic", "query"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains(reason), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "探した cache: {}",
+            root.join(".mikke/hf-cache").display()
+        )),
+        "{stderr}"
+    );
+    assert!(stderr.contains("埋め込みは構築済みです (mikke embed の再実行は不要)。モデルの取得・読み込みを確かめてください。"), "{stderr}");
+    assert!(
+        !stderr.contains("mikke embed を実行してください"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("再構築"), "{stderr}");
+    assert!(!stderr.contains("。。"), "{stderr}");
+    assert_hybrid_failed(root);
+}
+
+#[cfg(feature = "semantic")]
+#[test]
+fn semantic_model_fetch_failure_identifies_cache() {
+    let root = embedding_test_repo("sem-model-fetch");
+    assert_model_failure(&root, "config.json を取得できません");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(feature = "semantic")]
+#[test]
+fn semantic_model_parse_failures_identify_cache() {
+    for (stage, reason) in [
+        ("config", "config.json の解釈に失敗"),
+        ("tokenizer", "tokenizer の読み込みに失敗"),
+        ("weights", "モデル重みの読み込みに失敗"),
+        ("model", "モデルの構築に失敗"),
+    ] {
+        let root = embedding_test_repo(&format!("sem-model-{stage}"));
+        let cache = root.join(".mikke/hf-cache/models--intfloat--multilingual-e5-small");
+        fs::create_dir_all(cache.join("refs")).unwrap();
+        fs::write(cache.join("refs/main"), "test-revision").unwrap();
+        let snapshot = cache.join("snapshots/test-revision");
+        fs::create_dir_all(&snapshot).unwrap();
+        for file in ["config.json", "tokenizer.json", "model.safetensors"] {
+            fs::write(snapshot.join(file), "{broken").unwrap();
+        }
+        if stage != "config" {
+            fs::write(
+                snapshot.join("config.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "vocab_size": 2,
+                    "hidden_size": 2,
+                    "num_hidden_layers": 1,
+                    "num_attention_heads": 1,
+                    "intermediate_size": 2,
+                    "hidden_act": "gelu",
+                    "hidden_dropout_prob": 0.0,
+                    "max_position_embeddings": 512,
+                    "type_vocab_size": 2,
+                    "initializer_range": 0.02,
+                    "layer_norm_eps": 1e-12,
+                    "pad_token_id": 0
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        if stage == "weights" || stage == "model" {
+            tokenizers::Tokenizer::new(tokenizers::models::wordlevel::WordLevel::default())
+                .save(snapshot.join("tokenizer.json"), false)
+                .unwrap();
+        }
+        if stage == "model" {
+            candle_core::safetensors::save(
+                &std::collections::HashMap::<String, candle_core::Tensor>::new(),
+                snapshot.join("model.safetensors"),
+            )
+            .unwrap();
+        }
+        assert_model_failure(&root, reason);
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 /// embed → semantic → hybrid → 差分更新 → 削除 → prefix 変更 の一連 e2e。
@@ -2681,6 +2972,15 @@ fn semantic_e2e() {
         stdout.contains("via bm25+vec"),
         "両ストリーム融合 (via bm25+vec) が無い:\n{stdout}"
     );
+
+    let (stdout, stderr) = run(
+        &root,
+        &["hybrid", "カレー", "玉ねぎ", "--top", "3", "--json"],
+    );
+    let meta: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap())
+        .unwrap_or_else(|e| panic!("JSON のメタ行が不正 ({e}):\n{stdout}\n{stderr}"));
+    assert_eq!(meta["degraded"], false, "{stdout}\n{stderr}");
+    assert!(meta.get("degraded_reason").is_none(), "{stdout}\n{stderr}");
 
     // 4. 再実行: 差分なし
     let (stdout, _) = run(&root, &["embed"]);

@@ -74,6 +74,26 @@ struct Metadata {
     notes: Vec<MetaNote>,
 }
 
+/// semantic の失敗を、利用者への案内が異なる理由ごとに分ける。
+#[derive(Debug)]
+pub enum SemanticError {
+    NotBuilt(String),
+    Rebuild(String),
+    Model(String),
+    Read(String),
+}
+
+impl std::fmt::Display for SemanticError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotBuilt(message)
+            | Self::Rebuild(message)
+            | Self::Model(message)
+            | Self::Read(message) => f.write_str(message),
+        }
+    }
+}
+
 // --- candle エンコーダ ---
 
 /// tokenizer + BERT 系モデル一式。E5 系 (multilingual-e5-*) を想定。
@@ -121,9 +141,9 @@ impl Encoder {
         if let Some(endpoint) = std::env::var("HF_ENDPOINT").ok().filter(|v| !v.is_empty()) {
             builder = builder.with_endpoint(endpoint);
         }
-        let api = builder
-            .build()
-            .map_err(|e| format!("Hugging Face Hub API の初期化に失敗: {e}"))?;
+        let api = builder.build().map_err(|e| {
+            format!("Hugging Face Hub API の初期化に失敗: {e}\n  探した cache: {cache_location}")
+        })?;
         let repo = api.model(model_id.to_string());
         let fetch = |file: &str| {
             repo.get(file).map_err(|e| {
@@ -138,23 +158,27 @@ impl Encoder {
         let tokenizer_path = fetch("tokenizer.json")?;
         let weights_path = fetch("model.safetensors")?;
 
-        let config_text = std::fs::read_to_string(&config_path)
-            .map_err(|e| format!("config.json の読み込みに失敗: {e}"))?;
+        let config_text = std::fs::read_to_string(&config_path).map_err(|e| {
+            format!("config.json の読み込みに失敗: {e}\n  探した cache: {cache_location}")
+        })?;
         let bert_config: BertConfig = serde_json::from_str(&config_text)
-            .map_err(|e| format!("config.json の解釈に失敗 (BERT 系モデルのみ対応): {e}"))?;
+            .map_err(|e| format!("config.json の解釈に失敗 (BERT 系モデルのみ対応): {e}\n  探した cache: {cache_location}"))?;
         let max_len = serde_json::from_str::<serde_json::Value>(&config_text)
             .ok()
             .and_then(|v| v.get("max_position_embeddings").and_then(|n| n.as_u64()))
             .unwrap_or(MAX_SEQ_LEN as u64)
             .min(MAX_SEQ_LEN as u64) as usize;
 
-        let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| format!("tokenizer の読み込みに失敗: {e}"))?;
+        let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
+            format!("tokenizer の読み込みに失敗: {e}\n  探した cache: {cache_location}")
+        })?;
         // 窓の作成では系列全体の offsets が必要なため、truncation / padding を明示的に外す。
         let mut chunk_tokenizer = tokenizer.clone();
-        chunk_tokenizer
-            .with_truncation(None)
-            .map_err(|e| format!("chunk tokenizer の truncation 解除に失敗: {e}"))?;
+        chunk_tokenizer.with_truncation(None).map_err(|e| {
+            format!(
+                "chunk tokenizer の truncation 解除に失敗: {e}\n  探した cache: {cache_location}"
+            )
+        })?;
         chunk_tokenizer.with_padding(None);
         let pad_id = tokenizer
             .token_to_id("<pad>")
@@ -166,7 +190,7 @@ impl Encoder {
                 max_length: max_len,
                 ..Default::default()
             }))
-            .map_err(|e| format!("truncation 設定に失敗: {e}"))?;
+            .map_err(|e| format!("truncation 設定に失敗: {e}\n  探した cache: {cache_location}"))?;
         tokenizer.with_padding(Some(PaddingParams {
             strategy: PaddingStrategy::BatchLongest,
             pad_id,
@@ -176,11 +200,15 @@ impl Encoder {
 
         // mmap ロード: ファイルは HF cache 管理下で実行中は不変とみなす
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[weights_path], DTYPE, &device)
-                .map_err(|e| format!("モデル重みの読み込みに失敗: {e}"))?
+            VarBuilder::from_mmaped_safetensors(&[weights_path], DTYPE, &device).map_err(|e| {
+                format!("モデル重みの読み込みに失敗: {e}\n  探した cache: {cache_location}")
+            })?
         };
-        let model = BertModel::load(vb, &bert_config)
-            .map_err(|e| format!("モデルの構築に失敗 (BERT 系モデルのみ対応): {e}"))?;
+        let model = BertModel::load(vb, &bert_config).map_err(|e| {
+            format!(
+                "モデルの構築に失敗 (BERT 系モデルのみ対応): {e}\n  探した cache: {cache_location}"
+            )
+        })?;
         Ok(Encoder {
             tokenizer,
             chunk_tokenizer,
@@ -397,21 +425,28 @@ fn save_vectors(path: &Path, vectors: &[Vec<f32>]) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| format!("safetensors の配置に失敗: {e}"))
 }
 
-fn load_vectors(path: &Path) -> Result<Vec<Vec<f32>>, String> {
-    let tensors = candle_core::safetensors::load(path, &Device::Cpu)
-        .map_err(|e| format!("safetensors の読み込みに失敗: {e}"))?;
-    let t = tensors
-        .get("vectors")
-        .ok_or("embeddings.safetensors に 'vectors' がありません")?;
+fn load_vectors(path: &Path) -> Result<Vec<Vec<f32>>, SemanticError> {
+    let tensors = candle_core::safetensors::load(path, &Device::Cpu).map_err(|e| {
+        let message = format!("safetensors の読み込みに失敗: {e}");
+        if matches!(e, candle_core::Error::Io(_)) {
+            SemanticError::Read(message)
+        } else {
+            SemanticError::Rebuild(message)
+        }
+    })?;
+    let t = tensors.get("vectors").ok_or_else(|| {
+        SemanticError::Rebuild("embeddings.safetensors に 'vectors' がありません".to_string())
+    })?;
     t.to_dtype(DType::F32)
         .and_then(|t| t.to_vec2::<f32>())
-        .map_err(|e| format!("ベクトル行列の読み込みに失敗: {e}"))
+        .map_err(|e| SemanticError::Rebuild(format!("ベクトル行列の読み込みに失敗: {e}")))
 }
 
-fn read_metadata(path: &Path) -> Result<Metadata, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("metadata.json の読み込みに失敗: {e}"))?;
-    serde_json::from_str(&text).map_err(|e| format!("metadata.json の解釈に失敗: {e}"))
+fn read_metadata(path: &Path) -> Result<Metadata, SemanticError> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| SemanticError::Read(format!("metadata.json の読み込みに失敗: {e}")))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| SemanticError::Rebuild(format!("metadata.json の解釈に失敗: {e}")))
 }
 
 fn has_current_chunking(metadata: &Metadata) -> bool {
@@ -791,45 +826,50 @@ pub fn semantic_ranked(
     cfg: &Config,
     query: &str,
     top_n: usize,
-) -> Result<Vec<(String, f64)>, String> {
+) -> Result<Vec<(String, f64)>, SemanticError> {
     let embeddings_file = cfg.embeddings_dir().join("embeddings.safetensors");
     let metadata_file = cfg.embeddings_dir().join("metadata.json");
     if !embeddings_file.exists() || !metadata_file.exists() {
-        return Err("埋め込みデータが見つかりません".to_string());
+        return Err(SemanticError::NotBuilt(
+            "埋め込みデータが見つかりません".to_string(),
+        ));
     }
     let meta = read_metadata(&metadata_file)?;
     if !has_current_chunking(&meta) {
-        return Err(
+        return Err(SemanticError::Rebuild(
             "埋め込みの保存形式が古いため使用できません。mikke embed で再構築してください"
                 .to_string(),
-        );
+        ));
     }
     let vectors = load_vectors(&embeddings_file)?;
     let expected_vectors = metadata_vector_count(&meta).ok_or_else(|| {
-        "metadata の chunks が不正です。mikke embed --force で再構築してください".to_string()
+        SemanticError::Rebuild(
+            "metadata の chunks が不正です。mikke embed --force で再構築してください".to_string(),
+        )
     })?;
     if vectors.len() != expected_vectors {
-        return Err(format!(
+        return Err(SemanticError::Rebuild(format!(
             "埋め込み ({}行) と metadata の chunks 合計 ({expected_vectors}行) が一致しません。mikke embed --force で再構築してください",
             vectors.len(),
-        ));
+        )));
     }
 
     let model_id = meta.model.as_deref().unwrap_or(&cfg.model);
     let query_prefix = meta.query_prefix.as_deref().unwrap_or(&cfg.query_prefix);
-    let encoder = Encoder::load(model_id)?;
+    let encoder = Encoder::load(model_id).map_err(SemanticError::Model)?;
     let query_vec = encoder
-        .encode(&[format!("{query_prefix}{query}")], None)?
+        .encode(&[format!("{query_prefix}{query}")], None)
+        .map_err(SemanticError::Model)?
         .pop()
-        .ok_or("クエリの埋め込みに失敗")?;
+        .ok_or_else(|| SemanticError::Model("クエリの埋め込みに失敗".to_string()))?;
     // 次元不一致 (破損・別モデルの残骸) は zip で黙って切り詰めず明示エラー
     if let Some(first) = vectors.first() {
         if first.len() != query_vec.len() {
-            return Err(format!(
+            return Err(SemanticError::Rebuild(format!(
                 "埋め込み次元 ({}) とクエリ次元 ({}) が一致しません。mikke embed --force で再構築してください",
                 first.len(),
                 query_vec.len()
-            ));
+            )));
         }
     }
 
@@ -849,6 +889,22 @@ pub fn semantic_ranked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_vector_tensors_require_rebuild() {
+        let dir = std::env::temp_dir().join(format!("mikke-vector-errors-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("embeddings.safetensors");
+        let tensor = Tensor::new(&[1f32, 0f32], &Device::Cpu).unwrap();
+        for name in ["other", "vectors"] {
+            candle_core::safetensors::save(&HashMap::from([(name, tensor.clone())]), &path)
+                .unwrap();
+            let error = load_vectors(&path).unwrap_err();
+            assert!(matches!(error, SemanticError::Rebuild(_)), "{error}");
+            assert!(!error.to_string().contains("再構築してください"));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn hf_cache_dir_priority() {
