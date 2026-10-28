@@ -1,13 +1,12 @@
 //! 設定 (mikke.toml / .mikke.toml) 読み込みとルート解決。
 //!
 //! ルート解決の優先順: --root 引数 > 環境変数 MIKKE_ROOT > cwd から上方に
-//! mikke.toml / .mikke.toml を探索 > git root。型不一致は silent に誤動作させず即エラー終了する
+//! mikke.toml / .mikke.toml を探索。型不一致は silent に誤動作させず即エラー終了する
 //! (特に「文字列配列指定に文字列を渡すと 1 文字ずつに分解される」事故を型検査で弾く)。
 //! 未知の節・キーと効かない値は警告にとどめる (docs/SPEC.md「設定読み込みの厳格さ」)。
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Mutex;
 
 /// 設定ファイル名の探索順 (先頭が優先)。隠したい repo 向けに dotfile 変種も受ける。
@@ -240,22 +239,17 @@ pub fn resolve_root(cli_root: Option<&str>) -> PathBuf {
             return d.to_path_buf();
         }
     }
-    // git root フォールバック (encoding は UTF-8 前提)
-    if let Ok(out) = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-    {
-        if out.status.success() {
-            let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !top.is_empty() {
-                let p = PathBuf::from(top);
-                return std::fs::canonicalize(&p).unwrap_or(p);
-            }
-        }
-    }
-    err_root(
-        "ルートを特定できません。mikke.toml (または .mikke.toml) をノートフォルダのルートに置くか、--root / MIKKE_ROOT で指定してください。"
+    let mut msg = format!(
+        "ルートを特定できません (cwd: {})。次のどれかで root を指定してください。\n  - ノートフォルダのルートに空の mikke.toml (または .mikke.toml) を置く\n  - --root <PATH> を付ける\n  - 環境変数 MIKKE_ROOT を設定する",
+        display_path(&cwd)
     );
+    if let Some(d) = cwd.ancestors().find(|d| d.join(".git").exists()) {
+        msg.push_str(&format!(
+            "\n  {} に .git があります。0.6 までは、git repo の root を root にしていました。",
+            display_path(d)
+        ));
+    }
+    err_root(&msg);
 }
 
 // --- TOML 型検査ヘルパ (型不一致は即エラー終了 — docs/SPEC.md「設定読み込みの厳格さ」) ---

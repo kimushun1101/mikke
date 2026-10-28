@@ -4,7 +4,7 @@ mikke の挙動の正本。CLI 表面・設定キー・出力の意味は安定�
 
 ## CLI 表面
 
-グローバル: `--version`(`mikke <version>` を出力。semantic feature 有効ビルドは `mikke <version> (+semantic)` と表示し、slim/full どちらのバイナリか判別できる) / `--root PATH`(省略時: 環境変数 `MIKKE_ROOT` → cwd から `mikke.toml` / `.mikke.toml` 上方探索 → git root)。
+グローバル: `--version`(`mikke <version>` を出力。semantic feature 有効ビルドは `mikke <version> (+semantic)` と表示し、slim/full どちらのバイナリか判別できる) / `--root PATH`(省略時: 環境変数 `MIKKE_ROOT` → cwd から `mikke.toml` / `.mikke.toml` 上方探索)。上方探索は `.git` では止まらない。どれでも root が決まらなければ exit 2 で終了し、`.mikke/` を作らない。
 
 | サブコマンド | 引数 | 意味 |
 |---|---|---|
@@ -128,7 +128,7 @@ meta(key PRIMARY KEY, value)     -- meta['generated'] に index 生成時刻 (he
                                  -- (auto_rebuild の stale 判定に使用)、meta['index_format'] に索引形式
 ```
 
-index が無い場合は検索時に自動 build(clone 直後フォールバック)。`mikke index` は全再構築で、次の手順で作り直す: `<path>.lock` を排他ロックする(作り直しは 1 本ずつ。待つ間は stderr に告知する) → 同じフォルダの `<path>.tmp-<pid>` に 1 つの transaction で書く → 閉じる → rename で差し替える。最中の検索は直前の index を読む。中断・panic・走査中の設定エラーの後は、直前の index が残る(初回は無いまま)。残った一時ファイル(`<path>.tmp-<数字>` とその `-journal`)は、次の作り直しで消す。この形でないファイルは消さない。ロック非対応の FS では、Warning を出してロック無しで作る。Windows で差し替えられない時は約 10 秒リトライし、だめなら直前の index を残して exit 2 にする。`notes` / `tags.tag` / `links` と `summary` / `word_count` は原文由来の値を保ち、`notes_fts.title` / `notes_fts.content` / `tags.tag_search` は検索用に、全角・半角の幅を畳んでから和欧間スペースを正規化する(順は下の「幅の畳み込み」)。正規化は U+0020 1 個の両隣が非 whitespace かつ少なくとも片側が和文クラスの場合にその空白を削除する(和文クラスは U+3001–U+303F、U+3040–U+30FF、U+31F0–U+31FF、U+3400–U+4DBF、U+4E00–U+9FFF、U+F900–U+FAFF、U+FF00–U+FFEF)。全角スペース・連続空白・行頭行末・タブ・NBSP は保存し、正規化は冪等。**幅の畳み込み**: U+FF01–U+FFEF(全角形・半角形。U+FFE3 は NFKC で空白を作るので除く)の連続部分だけに NFKC をかける(`ＧＰＳ` → `GPS`、`ｶﾞｲﾄﾞ` → `ガイド`)。幅以外の NFKC(`①` → `1`、`㎏` → `kg`、U+3000 → U+0020 など)はかけない。空白は作りも消しもしない。幅を畳んでから空白を削除する(逆順だと和文クラスに入る全角英数の間の空白だけが消え、ASCII で書いた形と食い違う)。`meta['generated']` は epoch 秒の小数文字列(秒精度だと mtime との比較で秒未満の更新を取りこぼすため)。index フォーマットは内部表現であり互換保証しない(`.mikke/` は常に再生成可能)。
+index が無い場合は検索時に自動 build する。`mikke.toml` / `.mikke.toml` を commit 済みの repo なら、clone 直後も同じ。`mikke index` は全再構築で、次の手順で作り直す: `<path>.lock` を排他ロックする(作り直しは 1 本ずつ。待つ間は stderr に告知する) → 同じフォルダの `<path>.tmp-<pid>` に 1 つの transaction で書く → 閉じる → rename で差し替える。最中の検索は直前の index を読む。中断・panic・走査中の設定エラーの後は、直前の index が残る(初回は無いまま)。残った一時ファイル(`<path>.tmp-<数字>` とその `-journal`)は、次の作り直しで消す。この形でないファイルは消さない。ロック非対応の FS では、Warning を出してロック無しで作る。Windows で差し替えられない時は約 10 秒リトライし、だめなら直前の index を残して exit 2 にする。`notes` / `tags.tag` / `links` と `summary` / `word_count` は原文由来の値を保ち、`notes_fts.title` / `notes_fts.content` / `tags.tag_search` は検索用に、全角・半角の幅を畳んでから和欧間スペースを正規化する(順は下の「幅の畳み込み」)。正規化は U+0020 1 個の両隣が非 whitespace かつ少なくとも片側が和文クラスの場合にその空白を削除する(和文クラスは U+3001–U+303F、U+3040–U+30FF、U+31F0–U+31FF、U+3400–U+4DBF、U+4E00–U+9FFF、U+F900–U+FAFF、U+FF00–U+FFEF)。全角スペース・連続空白・行頭行末・タブ・NBSP は保存し、正規化は冪等。**幅の畳み込み**: U+FF01–U+FFEF(全角形・半角形。U+FFE3 は NFKC で空白を作るので除く)の連続部分だけに NFKC をかける(`ＧＰＳ` → `GPS`、`ｶﾞｲﾄﾞ` → `ガイド`)。幅以外の NFKC(`①` → `1`、`㎏` → `kg`、U+3000 → U+0020 など)はかけない。空白は作りも消しもしない。幅を畳んでから空白を削除する(逆順だと和文クラスに入る全角英数の間の空白だけが消え、ASCII で書いた形と食い違う)。`meta['generated']` は epoch 秒の小数文字列(秒精度だと mtime との比較で秒未満の更新を取りこぼすため)。index フォーマットは内部表現であり互換保証しない(`.mikke/` は常に再生成可能)。
 
 **index の判定**: `[index] path` のファイルを、無い / mikke の index / 作りかけ / それ以外(mikke の index でない・読めない)に分ける。mikke の index は、SQLite で、表の名前がすべて mikke のもの、notes の列が一致、meta テーブルがあるもの。作りかけは、0 バイト、表が無い、mikke の表だけで meta テーブルが無いもの。毎回の確認は、短命の接続で sqlite_master・notes の列・meta の 3 行(`index_format` / `generated` / `scanned_paths_sha256`)を読むだけで、md の走査はしない(既定経路の即起動を保つ)。判定は読み取り専用で開き、ファイルと付随ファイルを書き換えない。WAL モードの SQLite は開かずに mikke の index でないとする(mikke は WAL を使わない。開くと SQLite が `-wal` を書き戻して消すため)。巻き戻しの要る journal が残っている時は、journal を無視して形だけ見て、mikke の index か作りかけの時だけ巻き戻す(旧版は最終 path に直接書いていたため)。
 
@@ -242,7 +242,7 @@ silent に壊れやすい箇所。いずれも過去に実運用で踏んだ har
 
 - **BOM**: md/TOML は utf-8-sig 相当で読む(BOM を content の一部にしない)。BOM を素の utf-8 で読むと先頭の `---` が認識されず frontmatter が silent 喪失する。
 - **CJK 文字クラスのエスケープ表記**: 「ノートの解釈」の語数カウント参照。生リテラルの範囲指定はエディタ・ツールの NFC 正規化で別文字に化け、判定が silent にずれる。
-- **git 出力の encoding**: `--show-toplevel` / `ls-files` は UTF-8 で decode し、`core.quotepath=off`。非 ASCII パスが silent に壊れる/skip されるのを防ぐ。
+- **git 出力の encoding**: `ls-files` は UTF-8 で decode し、`core.quotepath=off`。非 ASCII パスが silent に壊れる/skip されるのを防ぐ。
 - **stdout encoding**: Windows で符号化不能文字(em dash 等)が混ざっても crash させず継続(console/リダイレクト時の挙動をテスト)。
 - **改行**: md レポートは LF 固定(health 参照)。
 - **パスの区切り**: `exclude_paths` は OS によらず `/` で書く(`\` はエラー)。判定は root 相対の posix 表現で比べる。`.gitignore` は各ファイルの置き場所からの相対パスで照らす(Windows の verbatim パスでも一致させるため)。大文字小文字はどの OS でも区別する。

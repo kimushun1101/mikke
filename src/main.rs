@@ -32,7 +32,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
     about = "Markdown ノート検索 CLI (BM25 + optional semantic hybrid, 日本語対応)"
 )]
 struct Cli {
-    /// ノート repo のルート (省略時: MIKKE_ROOT → cwd から mikke.toml/.mikke.toml を上方探索 → git root)
+    /// ノート repo のルート (省略時: MIKKE_ROOT → cwd から mikke.toml/.mikke.toml を上方探索)
     #[arg(long, global = true)]
     root: Option<String>,
     #[command(subcommand)]

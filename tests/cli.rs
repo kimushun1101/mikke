@@ -92,6 +92,218 @@ fn run_raw(root: &Path, args: &[&str]) -> std::process::Output {
         .expect("failed to run mikke")
 }
 
+/// --root 無しの exit status も確認する。root と git の環境変数は子プロセスだけで制御する。
+fn run_in_raw(cwd: &Path, args: &[&str], env_root: Option<&Path>) -> std::process::Output {
+    let mut cmd = Command::new(bin());
+    cmd.current_dir(cwd)
+        .env_remove("MIKKE_ROOT")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_CEILING_DIRECTORIES")
+        .args(args);
+    if let Some(root) = env_root {
+        cmd.env("MIKKE_ROOT", root);
+    }
+    cmd.output().expect("failed to run mikke")
+}
+
+/// git が repo と認める最小構成。空の .git/ では旧 fallback の退行を検出できない。
+fn make_git_dir(root: &Path) {
+    fs::create_dir_all(root.join(".git/objects")).unwrap();
+    fs::create_dir_all(root.join(".git/refs")).unwrap();
+    fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+}
+
+fn assert_root_error(out: &std::process::Output, cwd: &Path, root: &Path) -> String {
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(out.stdout.is_empty(), "{:?}", out.stdout);
+    assert!(!root.join(".mikke").exists(), "root に .mikke/ が作られた");
+    assert!(!cwd.join(".mikke").exists(), "cwd に .mikke/ が作られた");
+    let (shown_cwd, message) = stderr
+        .strip_prefix("Error: ルートを特定できません (cwd: ")
+        .and_then(|s| s.split_once(")。"))
+        .unwrap_or_else(|| panic!("{stderr}"));
+    assert_eq!(
+        fs::canonicalize(shown_cwd).unwrap(),
+        fs::canonicalize(cwd).unwrap(),
+        "{stderr}"
+    );
+    assert!(
+        message.starts_with("次のどれかで root を指定してください。\n"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(r"\\?\"), "{stderr}");
+    for remedy in [
+        "  - ノートフォルダのルートに空の mikke.toml (または .mikke.toml) を置く\n",
+        "  - --root <PATH> を付ける\n",
+        "  - 環境変数 MIKKE_ROOT を設定する\n",
+    ] {
+        assert!(stderr.contains(remedy), "{stderr}");
+    }
+    stderr
+}
+
+fn assert_git_hint(stderr: &str, expected: &Path) {
+    let shown = stderr
+        .lines()
+        .last()
+        .and_then(|line| line.strip_prefix("  "))
+        .and_then(|line| {
+            line.strip_suffix(
+                " に .git があります。0.6 までは、git repo の root を root にしていました。",
+            )
+        })
+        .unwrap_or_else(|| panic!("{stderr}"));
+    assert_eq!(
+        fs::canonicalize(shown).unwrap(),
+        fs::canonicalize(expected).unwrap(),
+        "{stderr}"
+    );
+    assert!(stderr.ends_with('\n'), "{stderr}");
+    assert_eq!(
+        stderr.matches("に .git があります。").count(),
+        1,
+        "{stderr}"
+    );
+}
+
+/// 設定の無い木は git repo 内外・サブディレクトリでも root 未特定で止まる。
+#[test]
+fn root_required_without_config() {
+    // temp の祖先に mikke.toml / .mikke.toml が無いことが前提。
+    // Windows の temp は利用者の profile 配下なので、profile 直下などに設定があると
+    // 上方探索で拾い、このテストは失敗する (.git で探索を止める仕様ではない)。
+    let commands: &[&[&str]] = &[
+        &["find", "quokka"],
+        &["tag", "quokka"],
+        &["title", "quokka"],
+        &["semantic", "quokka"],
+        &["hybrid", "quokka"],
+        &["list-tags"],
+        &["recent"],
+        &["links", "a.md"],
+        &["backlinks", "a.md"],
+        &["index"],
+        &["health"],
+        &["embed"],
+    ];
+    for with_git in [false, true] {
+        let root = temp_repo(
+            if with_git {
+                "root-no-config-git"
+            } else {
+                "root-no-config-plain"
+            },
+            &[("notes/a.md", "# A\n\nquokka のメモ。\n")],
+        );
+        if with_git {
+            make_git_dir(&root);
+        }
+        let nearest_git = fs::canonicalize(&root)
+            .unwrap()
+            .ancestors()
+            .find(|d| d.join(".git").exists())
+            .map(Path::to_path_buf);
+        for cwd in [&root, &root.join("notes")] {
+            for env_root in [None, Some(Path::new(""))] {
+                for args in commands {
+                    let out = run_in_raw(cwd, args, env_root);
+                    let stderr = assert_root_error(&out, cwd, &root);
+                    if let Some(git_dir) = &nearest_git {
+                        assert_git_hint(&stderr, git_dir);
+                    } else {
+                        assert!(!stderr.contains(".git"), "{args:?}: {stderr}");
+                        assert!(!stderr.contains("0.6"), "{args:?}: {stderr}");
+                    }
+                }
+            }
+            for args in [&["--version"][..], &["--help"][..]] {
+                let out = run_in_raw(cwd, args, None);
+                assert!(out.status.success(), "{:?}", out.stderr);
+                assert!(!out.stdout.is_empty());
+                assert!(out.stderr.is_empty(), "{:?}", out.stderr);
+                assert!(!root.join(".mikke").exists());
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+/// 案内は最も近い .git を使う。空のディレクトリや行き先の無いファイルでもよい。
+#[test]
+fn root_error_git_hint_uses_nearest_marker() {
+    for marker_file in [false, true] {
+        let root = temp_repo(
+            if marker_file {
+                "root-git-file"
+            } else {
+                "root-git-empty-dir"
+            },
+            &[("nested/notes/a.md", "# A\n")],
+        );
+        make_git_dir(&root);
+        let nearest = root.join("nested");
+        if marker_file {
+            fs::write(nearest.join(".git"), "gitdir: missing\n").unwrap();
+        } else {
+            fs::create_dir(nearest.join(".git")).unwrap();
+        }
+        let cwd = nearest.join("notes");
+        let out = run_in_raw(&cwd, &["find", "quokka"], None);
+        let stderr = assert_root_error(&out, &cwd, &root);
+        assert_git_hint(&stderr, &nearest);
+        assert!(!nearest.join(".mikke").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+/// 設定の無い git repo でも --root / MIKKE_ROOT で明示すれば index を作る。
+#[test]
+fn explicit_root_allows_unconfigured_git_repo() {
+    let root = temp_repo("root-explicit-git", &[("notes/a.md", "# A\n")]);
+    make_git_dir(&root);
+    let cwd = root.join("notes");
+    let out = run_in_raw(
+        &cwd,
+        &["--root", root.to_str().unwrap(), "index"],
+        Some(&root.join("missing")),
+    );
+    assert!(out.status.success(), "{:?}", out.stderr);
+    assert!(root.join(".mikke/index.sqlite").is_file());
+    fs::remove_dir_all(root.join(".mikke")).unwrap();
+
+    let out = run_in_raw(&cwd, &["index"], Some(&root));
+    assert!(out.status.success(), "{:?}", out.stderr);
+    assert!(root.join(".mikke/index.sqlite").is_file());
+    assert!(!cwd.join(".mikke").exists());
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// 上方探索は .git を越え、親の可視・隠し設定ファイルで root を決める。
+#[test]
+fn root_config_search_crosses_git_boundary() {
+    for filename in ["mikke.toml", ".mikke.toml"] {
+        let root = temp_repo(
+            &format!("root-cross-git-{filename}"),
+            &[
+                (filename, ""),
+                ("a.md", "# A\n\nquokka のメモ。\n"),
+                ("repo/src/b.md", "# B\n"),
+            ],
+        );
+        let nested = root.join("repo");
+        make_git_dir(&nested);
+        let cwd = nested.join("src");
+        let out = run_in_raw(&cwd, &["find", "quokka"], None);
+        assert!(out.status.success(), "{:?}", out.stderr);
+        assert!(String::from_utf8_lossy(&out.stdout).contains("path: a.md"));
+        assert!(root.join(".mikke/index.sqlite").is_file());
+        assert!(!nested.join(".mikke").exists());
+        assert!(!cwd.join(".mikke").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
 /// 和欧間スペースの有無を索引側で吸収し、原文テーブルと表示は維持する。
 #[test]
 fn japanese_spacing_searches_are_symmetric() {

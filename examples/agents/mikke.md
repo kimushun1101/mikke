@@ -8,7 +8,7 @@
 
 過去の知見・記録を引き出す時は `mikke` CLI で検索する。最新仕様・時事・バージョン依存の情報は Web を正とし、ノート検索で代替しない。
 
-前提: `mikke` が PATH にある。root 解決順: `--root` → 環境変数 `MIKKE_ROOT` → cwd から `mikke.toml` (または `.mikke.toml`) 上方探索 → git root (cwd 外の KB は `mikke --root <path>`)。index は無ければ検索時に自動生成される。重い `mikke embed` (初回はモデル DL あり) はユーザー確認後に実行する。
+前提: `mikke` が PATH にある。root 解決順: `--root` → 環境変数 `MIKKE_ROOT` → cwd から `mikke.toml` (または `.mikke.toml`) 上方探索 (cwd 外の KB は `mikke --root <path>`)。index は無ければ検索時に自動生成される。重い `mikke embed` (初回はモデル DL あり) はユーザー確認後に実行する。
 
 コマンド一覧は `mikke --help`、個別の引数・オプションは `mikke <サブコマンド> --help` で確認する (ここに列挙しない — 実装を正として同期ズレを防ぐ)。
 

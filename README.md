@@ -41,6 +41,7 @@ cargo install --git https://github.com/kimushun1101/mikke --locked
 
 ```bash
 cd <ノートフォルダ>
+touch mikke.toml          # 初回のみ。ルートの目印
 mikke index               # index 生成 (初回は検索時に自動生成される)
 mikke find 検索 語        # 全文検索 (BM25 順)
 mikke find 言い換え 表記ゆれ --any # いずれかを含むノートを検索 (OR。既定は AND)
@@ -65,7 +66,7 @@ mikke hybrid 言い換え 表記ゆれ --any # BM25 側を OR 検索
 
 `find --snippet` は各ヒットについて、検索語が当たった本文の行を行番号付きで最大 3 行表示する (多くの検索語を含む行を優先する)。全角・半角と大文字・小文字は find と同様に吸収するため、grep で再検索せずに開くノートを絞れる。`--json` と併用すると hit 行に `matches` 配列が加わる。
 
-ルートは `--root PATH` 明示指定 → 環境変数 `MIKKE_ROOT` → cwd からの `mikke.toml` (設定を隠したい場合は `.mikke.toml`) 上方探索 → git root の順で決める。git 管理でないフォルダも、`mikke.toml` を置くか `--root` を指定すればそのまま対象にできる。
+ルートは `--root PATH` 明示指定 → 環境変数 `MIKKE_ROOT` → cwd からの `mikke.toml` (設定を隠したい場合は `.mikke.toml`) 上方探索の順で決める。git 管理の有無によらず、`mikke.toml` (または `.mikke.toml`) を置くか `--root` / `MIKKE_ROOT` を指定したフォルダが対象になる。どれでも決まらなければ exit 2 で終わる。
 
 ### 設定 (mikke.toml)
 
