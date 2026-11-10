@@ -19,6 +19,8 @@ use std::sync::OnceLock;
 pub struct Note {
     pub path_rel: String, // root 相対 posix パス
     pub title: String,
+    /// frontmatter aliases。検索用に notes_fts.title へ足すだけで表示には使わない。
+    pub aliases: Vec<String>,
     pub tags: Vec<String>,
     /// YAML の null / 空文字列だった tags 要素数。index/health で修正箇所を報告する。
     pub empty_tag_count: usize,
@@ -529,6 +531,19 @@ pub fn load_note(abs: &Path, rel: &Path) -> Option<Note> {
         .map(yaml_scalar_string);
     let title = extract_title(fm_title.as_deref(), &content, abs);
 
+    let alias_values = match meta_get(&metadata, "aliases") {
+        Some(Value::Sequence(seq)) => seq.as_slice(),
+        Some(value) => std::slice::from_ref(value),
+        None => &[],
+    };
+    let mut seen = HashSet::new();
+    let aliases = alias_values
+        .iter()
+        .filter(|v| matches!(v, Value::String(_) | Value::Number(_) | Value::Bool(_)))
+        .map(yaml_scalar_string)
+        .filter(|s| !s.trim().is_empty() && seen.insert(s.clone()))
+        .collect();
+
     let (tags, empty_tag_count) = match meta_get(&metadata, "tags") {
         Some(Value::Sequence(seq)) => parse_tags(seq),
         // tags を文字列で書くと 1 文字ずつ分解される (歴史的 quirk。変えるなら golden ごと意図的に)
@@ -554,6 +569,7 @@ pub fn load_note(abs: &Path, rel: &Path) -> Option<Note> {
     Some(Note {
         path_rel: to_posix(rel),
         title,
+        aliases,
         tags,
         empty_tag_count,
         date,
@@ -617,8 +633,39 @@ pub fn read_utf8_sig(path: &Path) -> std::io::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_tags;
+    use super::{load_note, parse_tags};
     use serde_yaml_ng::Value;
+
+    #[test]
+    fn aliases_accept_scalars_and_lists_and_drop_empty_and_duplicate_values() {
+        let path = std::env::temp_dir().join(format!("mikke-aliases-{}.md", std::process::id()));
+        for (yaml, expected) in [
+            ("aliases: [別名, other]", vec!["別名", "other"]),
+            ("aliases: 別名の文字列", vec!["別名の文字列"]),
+            (
+                "aliases: [null, '', '  ', 別名, [], {key: value}]",
+                vec!["別名"],
+            ),
+            ("aliases: [other, 別名, other, 別名]", vec!["other", "別名"]),
+            (
+                "aliases: [42, true, false, 0]",
+                vec!["42", "True", "False", "0"],
+            ),
+            ("aliases: 42", vec!["42"]),
+            ("aliases: false", vec!["False"]),
+            ("aliases: ''", vec![]),
+            ("aliases: '  '", vec![]),
+            ("aliases: null", vec![]),
+            ("aliases: []", vec![]),
+            ("aliases: {key: value}", vec![]),
+            ("", vec![]),
+        ] {
+            std::fs::write(&path, format!("---\n{yaml}\n---\n本文。\n")).unwrap();
+            let note = load_note(&path, std::path::Path::new("note.md")).unwrap();
+            assert_eq!(note.aliases, expected, "{yaml}");
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn tags_drop_empty_and_deduplicate_in_input_order() {
