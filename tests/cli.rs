@@ -467,6 +467,84 @@ fn title_whitespace_keyword_is_not_trimmed_to_empty() {
     let _ = fs::remove_dir_all(&root);
 }
 
+#[test]
+fn aliases_are_searchable_without_changing_display_or_content() {
+    let root = temp_repo(
+        "aliases-search",
+        &[
+            ("mikke.toml", "[scan]\n"),
+            ("list.md", "---\ntitle: 元の題名\naliases: [衛星測位, 測位, 'ＧＰＳ 制御', GPS制御, 元の 題名]\n---\n本文。\n"),
+            ("scalar.md", "---\ntitle: 別の題名\naliases: 衛星測位\n---\n本文。\n"),
+            ("boundary.md", "---\ntitle: 境界確認\naliases: [ロボ, ット制御]\n---\n本文。\n"),
+            ("plain.md", "---\ntitle: ＲＯＳ 2 入門\n---\n本文。\n"),
+            ("empty.md", "---\ntitle: ＲＯＳ 2 入門\naliases: []\n---\n本文。\n"),
+        ],
+    );
+    assert!(run_raw(&root, &["index"]).status.success());
+    for (query, order) in [("衛星測位", "relevance"), ("測位", "approx")] {
+        let out = run_raw(&root, &["find", query, "--json"]);
+        assert!(out.status.success());
+        let rows: Vec<serde_json::Value> = String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(rows[0]["order"], order);
+        assert_eq!(rows[0]["count"], 2);
+        for (path, title) in [("list.md", "元の題名"), ("scalar.md", "別の題名")] {
+            assert!(rows[1..]
+                .iter()
+                .any(|r| r["path"] == path && r["title"] == title));
+        }
+    }
+    assert_eq!(hit_paths(&root, &["find", "GPS制御"]), ["list.md"]);
+    for command in ["find", "title"] {
+        for query in ["ロボット", "ボッ"] {
+            let out = run_raw(&root, &[command, query]);
+            assert_eq!(out.status.code(), Some(1), "{command} {query}");
+        }
+    }
+    let out = run_raw(&root, &["title", "衛星測位"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("元の題名") && stdout.contains("別の題名"));
+    let out = run_raw(&root, &["title", "衛星測位", "--json"]);
+    assert!(out.status.success());
+    let rows: Vec<serde_json::Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows[0]["count"], 2);
+    assert!(rows[1..]
+        .iter()
+        .any(|r| r["path"] == "list.md" && r["title"] == "元の題名"));
+    assert!(rows[1..]
+        .iter()
+        .any(|r| r["path"] == "scalar.md" && r["title"] == "別の題名"));
+
+    let conn = Connection::open(root.join(".mikke/index.sqlite")).unwrap();
+    for (path, expected_title) in [
+        ("list.md", "元の題名\n衛星測位\n測位\nGPS制御"),
+        ("scalar.md", "別の題名\n衛星測位"),
+        ("boundary.md", "境界確認\nロボ\nット制御"),
+        ("plain.md", "ROS 2入門"),
+        ("empty.md", "ROS 2入門"),
+    ] {
+        let (title, content): (String, String) = conn
+            .query_row(
+                "SELECT title, content FROM notes_fts WHERE path = ?1",
+                [path],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, expected_title, "{path}");
+        assert_eq!(content, "本文。", "{path}");
+    }
+    drop(conn);
+    fs::remove_dir_all(&root).unwrap();
+}
+
 /// 検索結果の `path:` 行を並べて返す (0 件なら空)。
 fn hit_paths(root: &Path, args: &[&str]) -> Vec<String> {
     let out = run_raw(root, args);
@@ -1598,7 +1676,7 @@ fn old_index_format_rebuilds_before_title_search() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(format, "4");
+    assert_eq!(format, "5");
     let _ = fs::remove_dir_all(&root);
 }
 

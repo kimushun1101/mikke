@@ -87,7 +87,7 @@ const SCHEMA: &str = "
 const META_SCANNED_PATHS: &str = "scanned_paths_sha256";
 const META_INDEX_FORMAT: &str = "index_format";
 // 正規化規則 (src/normalize.rs) や検索用の列を変えた場合は上げる。
-const INDEX_FORMAT: &str = "4";
+const INDEX_FORMAT: &str = "5";
 
 /// 走査 path 集合 (root 相対 posix) のスナップショット: ソート済リストの SHA-256。
 /// mtime が保存される移動・リネームや追加・削除を auto_rebuild の stale 判定で検知する。
@@ -711,7 +711,16 @@ fn write_index(cfg: &Config, use_stderr: bool, lock: &BuildLock) -> BuildIssues 
             )
             .expect("links への INSERT に失敗");
         }
-        let fts_title = search_text(&note.title);
+        let mut title_parts = vec![search_text(&note.title)];
+        let mut seen = HashSet::from([title_parts[0].clone()]);
+        for alias in &note.aliases {
+            let normalized = search_text(alias);
+            if seen.insert(normalized.clone()) {
+                title_parts.push(normalized);
+            }
+        }
+        // 要素ごとに正規化し、境界をまたぐ偽一致を改行で防ぐ。
+        let fts_title = title_parts.join("\n");
         let fts_content = search_text(&note.content);
         conn.execute(
             "INSERT INTO notes_fts (path, title, content) VALUES (?1, ?2, ?3)",
